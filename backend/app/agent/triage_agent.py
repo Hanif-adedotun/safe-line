@@ -21,6 +21,7 @@ from app.models import (
 )
 from app.services.case_store import find_linked_cases, get_case, save_case
 from app.services.dispatch import dispatch_caseworker_alert
+from app.services.live_location import describe_best_location
 from app.services.pii_scrubber import scrub_pii
 
 try:
@@ -320,12 +321,22 @@ async def _node_persist_and_dispatch(state: TriageState) -> dict[str, Any]:
 
     # Merge with existing case context on multi-turn follow-up
     merged_risk = max(risk, existing.risk_level) if existing else risk
-    merged_loc = ext.general_location or (existing.general_location if existing else None)
+    # A location the caller gave on the call (spoken address or GPS link) beats
+    # whatever the transcript classifier extracts.
+    live_loc = existing.location if existing else None
+    precise_loc = bool(live_loc and live_loc.best in ("gps", "spoken"))
+    if precise_loc:
+        merged_loc = existing.general_location
+    else:
+        merged_loc = ext.general_location or (existing.general_location if existing else None)
     merged_who = ext.who_at_risk or (existing.who_at_risk if existing else None)
     merged_entities = sorted(set((existing.entities if existing else []) + ext.entities))
     merged_danger = ext.immediate_danger or (existing.immediate_danger if existing else False)
     merged_harm = ext.harm_category if ext.harm_category != "other_concern" else (existing.harm_category if existing else ext.harm_category)
-    lat, lng = resolve_location_coords(merged_loc, req.region)
+    if live_loc and live_loc.gps:
+        lat, lng = live_loc.gps.latitude, live_loc.gps.longitude
+    else:
+        lat, lng = resolve_location_coords(merged_loc, req.region)
 
     draft = CaseRecord(
         id=case_id,
@@ -348,6 +359,8 @@ async def _node_persist_and_dispatch(state: TriageState) -> dict[str, Any]:
         alert_channels=list(existing.alert_channels) if existing else [],
         turns=turns,
         trace=[],
+        location=live_loc,
+        live_call=existing.live_call if existing else False,
     )
 
     linked = find_linked_cases(draft)
@@ -359,6 +372,7 @@ async def _node_persist_and_dispatch(state: TriageState) -> dict[str, Any]:
         harm_category=draft.harm_category,
         general_location=draft.general_location,
         redacted_summary=draft.redacted_summary,
+        location_detail=describe_best_location(live_loc),
     )
     if channels:
         draft.alert_dispatched = True

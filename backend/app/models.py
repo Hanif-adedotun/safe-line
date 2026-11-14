@@ -48,6 +48,32 @@ class TurnRecord(BaseModel):
     timestamp: str
 
 
+class GpsFix(BaseModel):
+    latitude: float
+    longitude: float
+    accuracy_m: Optional[float] = None
+    captured_at: str
+
+
+class LocationEvidence(BaseModel):
+    """Every location signal for a case, kept separate so a caseworker can see
+    where each one came from and how much to trust it."""
+
+    # Twilio FromCity/FromState (or number prefix). For mobiles this is where the
+    # number is registered, not where the caller is.
+    network: Optional[str] = None
+    network_source: Optional[str] = None
+    country: Optional[str] = None
+    # What the caller said when the agent asked where they are.
+    spoken_address: Optional[str] = None
+    spoken_at: Optional[str] = None
+    # Browser GPS from the one-tap link, the only precise signal.
+    gps: Optional[GpsFix] = None
+    link_sent_via: list[str] = Field(default_factory=list)
+    link_sent_at: Optional[str] = None
+    best: Literal["gps", "spoken", "network", "none"] = "none"
+
+
 class CaseRecord(BaseModel):
     id: str
     created_at: str
@@ -69,6 +95,8 @@ class CaseRecord(BaseModel):
     alert_channels: list[str] = Field(default_factory=list)
     turns: list[TurnRecord] = Field(default_factory=list)
     trace: list[AgentTraceStep] = Field(default_factory=list)
+    location: Optional[LocationEvidence] = None
+    live_call: bool = False
 
 
 class IntakeResponse(BaseModel):

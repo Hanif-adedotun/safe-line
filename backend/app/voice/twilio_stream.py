@@ -6,6 +6,11 @@ Handles full-duplex streaming audio between a Twilio phone call and Gemini Live.
 - Gemini Live yields: 24kHz PCM16 audio
 - Server downsamples: 24kHz -> 8kHz PCM16 -> mu-law -> base64 -> Twilio
 - Interruption handling: sends {"event": "clear"} to flush Twilio playback buffer.
+
+Location: the voice webhook passes Twilio's caller geo data as <Parameter>
+elements, which arrive here in `start.customParameters`. Gemini is only opened
+after that event so the location briefing is in the system prompt from the
+first word, and the live case exists before the caller says anything.
 """
 
 from __future__ import annotations
@@ -14,19 +19,22 @@ import asyncio
 import base64
 import json
 import logging
-from typing import Optional, Callable, Awaitable
+from typing import Awaitable, Callable, Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from app.voice.audio import (
-    mulaw_to_pcm16,
-    pcm16_to_mulaw,
-    Downsample24kTo8k,
-    FrameChunker,
-)
+from app.services import live_location
+from app.voice.audio import Downsample24kTo8k, FrameChunker, mulaw_to_pcm16, pcm16_to_mulaw
+from app.voice.caller_location import CallerLocation, build_location_briefing
 from app.voice.gemini_live import GeminiLiveSession, LiveConfig
 
 logger = logging.getLogger("safeline.voice.twilio")
+
+PUBLIC_BASE_PARAM = "sl_public_base"
+CALL_STARTED_CUE = (
+    "[SYSTEM NOTE, not spoken by the caller] The call has just connected. Greet the caller "
+    "now, following your opening instructions."
+)
 
 
 class TwilioMediaBridge:
@@ -44,68 +52,34 @@ class TwilioMediaBridge:
 
         self.stream_sid: Optional[str] = None
         self.call_sid: Optional[str] = None
+        self.caller_location: Optional[CallerLocation] = None
+        self.case_id: Optional[str] = None
         self.gemini_session: Optional[GeminiLiveSession] = None
         self.resampler = Downsample24kTo8k()
         self.chunker = FrameChunker(frame_bytes=160)  # 20ms of 8kHz mu-law = 160 bytes
         self._running = False
         self._outbound_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self._tasks: list[asyncio.Task] = []
 
     async def run(self):
         self._running = True
-        logger.info("Starting Twilio Media Bridge...")
-
-        cfg = LiveConfig(
-            system_prompt=self.system_prompt,
-            voice=self.voice_name,
-            input_rate=8000,
-        )
-
-        # Create Gemini Live session
-        self.gemini_session = GeminiLiveSession(
-            cfg,
-            on_audio=self._on_gemini_audio_chunk,
-            on_interrupted=self._on_interrupted,
-            on_turn_complete=self._on_turn_complete,
-        )
-
-        try:
-            await self.gemini_session.connect()
-            logger.info("Connected to Gemini Live successfully!")
-        except Exception as e:
-            logger.error(f"Failed to connect to Gemini Live: {e}")
-            await self.ws.close()
-            return
-
-        gemini_loop_task = asyncio.create_task(self.gemini_session.receive_forever())
-        sender_task = asyncio.create_task(self._outbound_sender())
-
         try:
             while self._running:
-                raw_text = await self.ws.receive_text()
-                data = json.loads(raw_text)
+                data = json.loads(await self.ws.receive_text())
                 event = data.get("event")
 
-                if event == "connected":
-                    logger.info("Twilio connected event received")
-
-                elif event == "start":
-                    start_data = data.get("start", {})
-                    self.stream_sid = start_data.get("streamSid")
-                    self.call_sid = start_data.get("callSid")
-                    logger.info(f"Twilio stream started: stream_sid={self.stream_sid} call_sid={self.call_sid}")
+                if event == "start":
+                    if not await self._on_start(data.get("start") or {}):
+                        break
 
                 elif event == "media":
-                    media_payload = data.get("media", {}).get("payload")
-                    if media_payload and self.gemini_session:
-                        # 1. Base64 decode Twilio mu-law
-                        mulaw_bytes = base64.b64decode(media_payload)
-                        # 2. Decode mu-law to 8kHz PCM16
-                        pcm16_bytes = mulaw_to_pcm16(mulaw_bytes)
-                        # 3. Stream to Gemini Live
-                        await self.gemini_session.send_audio(pcm16_bytes)
+                    payload = (data.get("media") or {}).get("payload")
+                    if payload and self.gemini_session:
+                        pcm16 = mulaw_to_pcm16(base64.b64decode(payload))
+                        await self.gemini_session.send_audio(pcm16)
 
                 elif event == "stop":
-                    logger.info("Twilio call stopped event received")
+                    logger.info("Twilio call stopped")
                     break
 
         except WebSocketDisconnect:
@@ -114,11 +88,66 @@ class TwilioMediaBridge:
             logger.error(f"Twilio bridge loop error: {e}", exc_info=True)
         finally:
             self._running = False
+            if self.case_id:
+                live_location.attach_injector(self.case_id, None)
             if self.gemini_session:
                 await self.gemini_session.close()
-            gemini_loop_task.cancel()
-            sender_task.cancel()
+            for task in self._tasks:
+                task.cancel()
             logger.info("Twilio Media Bridge closed.")
+
+    async def _on_start(self, start: dict) -> bool:
+        self.stream_sid = start.get("streamSid")
+        self.call_sid = start.get("callSid")
+        params = start.get("customParameters") or {}
+        self.caller_location = CallerLocation.from_custom_parameters(params)
+        public_base = (params.get(PUBLIC_BASE_PARAM) or "").strip() or None
+        logger.info(
+            "Twilio stream started call_sid=%s location=%s (%s)",
+            self.call_sid,
+            self.caller_location.describe(),
+            self.caller_location.source,
+        )
+
+        live_call = live_location.start_call(
+            caller_location=self.caller_location,
+            call_sid=self.call_sid,
+            public_base_url=public_base,
+        )
+        self.case_id = live_call.case_id
+
+        case_id = self.case_id
+
+        async def on_tool(name: str, args: dict) -> dict:
+            return await live_location.handle_tool_call(case_id, name, args)
+
+        cfg = LiveConfig(
+            system_prompt=self.system_prompt + build_location_briefing(self.caller_location),
+            voice=self.voice_name,
+            input_rate=8000,
+            tools=live_location.TOOL_DECLARATIONS,
+        )
+        self.gemini_session = GeminiLiveSession(
+            cfg,
+            on_audio=self._on_gemini_audio_chunk,
+            on_interrupted=self._on_interrupted,
+            on_turn_complete=self._on_turn_complete,
+            on_tool_call=on_tool,
+        )
+        try:
+            await self.gemini_session.connect()
+        except Exception as e:
+            logger.error("Failed to connect to Gemini Live: %s", e)
+            self.gemini_session = None
+            await self.ws.close()
+            return False
+
+        live_location.attach_injector(self.case_id, self.gemini_session.send_realtime_text)
+        self._tasks.append(asyncio.create_task(self.gemini_session.receive_forever()))
+        self._tasks.append(asyncio.create_task(self._outbound_sender()))
+        # Gemini Live does not speak until it hears something; make it greet first.
+        await self.gemini_session.send_realtime_text(CALL_STARTED_CUE)
+        return True
 
     def _on_gemini_audio_chunk(self, pcm24k_chunk: bytes):
         """Called synchronously when Gemini Live receives a 24kHz audio chunk."""
@@ -127,9 +156,7 @@ class TwilioMediaBridge:
         pcm8k = self.resampler.resample(pcm24k_chunk)
         if not pcm8k:
             return
-        mulaw = pcm16_to_mulaw(pcm8k)
-        frames = self.chunker.add_samples(mulaw)
-        for frame in frames:
+        for frame in self.chunker.add_samples(pcm16_to_mulaw(pcm8k)):
             self._outbound_queue.put_nowait(frame)
 
     async def _outbound_sender(self):
@@ -138,36 +165,29 @@ class TwilioMediaBridge:
             frame = await self._outbound_queue.get()
             if not self.stream_sid:
                 continue
-            b64_audio = base64.b64encode(frame).decode("utf-8")
-            media_message = {
-                "event": "media",
-                "streamSid": self.stream_sid,
-                "media": {
-                    "payload": b64_audio,
-                },
-            }
             try:
-                await self.ws.send_text(json.dumps(media_message))
+                await self.ws.send_text(
+                    json.dumps(
+                        {
+                            "event": "media",
+                            "streamSid": self.stream_sid,
+                            "media": {"payload": base64.b64encode(frame).decode("utf-8")},
+                        }
+                    )
+                )
             except Exception:
                 break
 
     async def _on_interrupted(self):
-        """Twilio user barged in: clear downstream playback buffer immediately."""
-        # Empty local outbound queue
+        """Caller barged in: clear downstream playback buffer immediately."""
         while not self._outbound_queue.empty():
             try:
                 self._outbound_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-
         if self.stream_sid:
-            logger.info("Barge-in: clearing Twilio audio buffer")
-            clear_message = {
-                "event": "clear",
-                "streamSid": self.stream_sid,
-            }
             try:
-                await self.ws.send_text(json.dumps(clear_message))
+                await self.ws.send_text(json.dumps({"event": "clear", "streamSid": self.stream_sid}))
             except Exception:
                 pass
 

@@ -74,6 +74,7 @@ async def dispatch_caseworker_alert(
     harm_category: str,
     general_location: str | None,
     redacted_summary: str,
+    location_detail: str | None = None,
 ) -> list[str]:
     """Fan out urgent Risk >= 2 alerts to phone voice call, SMS, and/or Photon 2.0."""
     if risk_level < 2:
@@ -84,6 +85,8 @@ async def dispatch_caseworker_alert(
         f"[SAFE-LINE RISK {risk_level}] Case {case_id} | {harm_category} | "
         f"Loc: {general_location or 'unspecified'} | {redacted_summary[:220]}"
     )
+    if location_detail:
+        message += f" | {location_detail}"
 
     channels: list[str] = []
     if target_phone:

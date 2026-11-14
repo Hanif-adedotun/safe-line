@@ -116,6 +116,7 @@ class GeminiLiveSession:
         self._send_lock = asyncio.Lock()
         self._caller_text = ""
         self._model_text = ""
+        self._tool_tasks: set[asyncio.Task] = set()
 
     async def connect(self, timeout: float = 12.0) -> None:
         if not self.api_key:
@@ -134,8 +135,13 @@ class GeminiLiveSession:
             first = json.loads(await asyncio.wait_for(self._ws.recv(), timeout=timeout))
         except Exception as exc:
             await self.close()
-            # Never log the URL: it contains the API key.
-            raise LiveSetupError(f"Live connect failed ({type(exc).__name__})") from None
+            # Never log the URL: it contains the API key. A ConnectionClosed
+            # carries Google's close code + reason, which is what we need to debug.
+            reason = ""
+            rcvd = getattr(exc, "rcvd", None)
+            if rcvd is not None:
+                reason = f" code={getattr(rcvd, 'code', '?')} reason={getattr(rcvd, 'reason', '')[:200]}"
+            raise LiveSetupError(f"Live connect failed ({type(exc).__name__}){reason}") from None
         if "setupComplete" not in first:
             await self.close()
             raise LiveSetupError(f"Live setup not acknowledged: {sorted(first)}")
@@ -169,6 +175,14 @@ class GeminiLiveSession:
             }
         )
 
+    async def send_realtime_text(self, text: str) -> None:
+        """Inject text mid-call. Same path Sabi production uses for cues; the
+        3.1 Live models expect realtimeInput.text, not clientContent, once the
+        conversation is running."""
+        if self._ws is None or not text:
+            return
+        await self._send({"realtimeInput": {"text": text}})
+
     async def end_audio(self) -> None:
         if self._ws is not None:
             try:
@@ -181,7 +195,11 @@ class GeminiLiveSession:
             msg = json.loads(raw)
 
             if msg.get("toolCall") and self.on_tool_call:
-                await self._answer_tools(msg["toolCall"])
+                # Run tools off the receive loop so a slow one (sending a text
+                # message) never stalls barge-in or audio handling.
+                task = asyncio.create_task(self._answer_tools(msg["toolCall"]))
+                self._tool_tasks.add(task)
+                task.add_done_callback(self._tool_tasks.discard)
 
             content = msg.get("serverContent") or {}
             if content.get("interrupted"):
@@ -215,7 +233,12 @@ class GeminiLiveSession:
             except Exception as exc:  # tool failure must not kill the call
                 result = {"error": type(exc).__name__}
             responses.append({"id": call.get("id"), "name": call.get("name"), "response": result})
-        await self._send({"toolResponse": {"functionResponses": responses}})
+        if self._ws is None:
+            return  # call ended while the tool ran
+        try:
+            await self._send({"toolResponse": {"functionResponses": responses}})
+        except Exception as exc:
+            logger.warning("Could not return tool response: %s", type(exc).__name__)
 
     async def close(self) -> None:
         if self._ws is not None:

@@ -18,6 +18,7 @@ import {
   Sparkles,
   ZoomIn,
   ZoomOut,
+  MapPin,
 } from "lucide-react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
@@ -36,6 +37,27 @@ interface Turn {
   text_redacted: string;
   timestamp: string;
 }
+
+interface GpsFix {
+  latitude: number;
+  longitude: number;
+  accuracy_m: number | null;
+  captured_at: string;
+}
+
+interface LocationEvidence {
+  network: string | null;
+  network_source: string | null;
+  country: string | null;
+  spoken_address: string | null;
+  spoken_at: string | null;
+  gps: GpsFix | null;
+  link_sent_via: string[];
+  link_sent_at: string | null;
+  best: "gps" | "spoken" | "network" | "none";
+}
+
+const mapsUrl = (q: string) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`;
 
 interface CaseRecord {
   id: string;
@@ -58,6 +80,8 @@ interface CaseRecord {
   alert_channels: string[];
   turns: Turn[];
   trace: TraceStep[];
+  location?: LocationEvidence | null;
+  live_call?: boolean;
 }
 
 interface Citation {
@@ -127,7 +151,8 @@ export default function SafeLineApp() {
       if (r.ok) {
         const data: CaseRecord[] = await r.json();
         setCases(data);
-        if (!selectedCase && data.length > 0) setSelectedCase(data[0]);
+        // Keep the open case in sync so live location updates appear without a reload.
+        setSelectedCase((prev) => (prev ? data.find((c) => c.id === prev.id) ?? prev : data[0] ?? null));
       }
     } catch {
       // Backend offline fallback handled silently
@@ -136,6 +161,9 @@ export default function SafeLineApp() {
 
   useEffect(() => {
     refreshCases();
+    // Live calls create and update cases server-side; poll so they appear on screen.
+    const t = setInterval(refreshCases, 3000);
+    return () => clearInterval(t);
   }, []);
 
   async function submitIntake(customText?: string, customChannel?: "photon_sms" | "voice_call" | "web_mic", customRegion?: "NG" | "US") {
@@ -377,7 +405,14 @@ export default function SafeLineApp() {
                   className="text-left rounded-xl border border-white/10 bg-[#111520] hover:border-[#CBA868]/60 p-4 transition space-y-2"
                 >
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-mono text-zinc-400">{c.id}</span>
+                    <span className="text-xs font-mono text-zinc-400 flex items-center gap-1.5">
+                      {c.id}
+                      {c.live_call && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/20 text-red-300 border border-red-500/40 animate-pulse">
+                          LIVE
+                        </span>
+                      )}
+                    </span>
                     <span className={`text-[11px] px-2 py-0.5 rounded-full border ${RISK_STYLE[c.risk_level]}`}>
                       Risk {c.risk_level} · {c.harm_category.replace("_", " ")}
                     </span>
@@ -500,6 +535,11 @@ export default function SafeLineApp() {
                     <div>
                       <div className="flex items-center gap-2">
                         <span className="font-mono text-sm text-[#CBA868]">{selectedCase.id}</span>
+                        {selectedCase.live_call && (
+                          <span className="text-[11px] px-2 py-0.5 rounded-full bg-red-500/20 text-red-300 border border-red-500/40 animate-pulse">
+                            ● LIVE CALL
+                          </span>
+                        )}
                         <span className={`text-xs px-2.5 py-0.5 rounded-full border ${RISK_STYLE[selectedCase.risk_level]}`}>
                           Risk Level {selectedCase.risk_level} · {selectedCase.harm_category}
                         </span>
@@ -527,6 +567,52 @@ export default function SafeLineApp() {
                       )}
                     </div>
                   </div>
+
+                  {/* Caller location: every signal, strongest first */}
+                  {selectedCase.location && (
+                    <div className="rounded-xl border border-white/10 bg-black/30 p-3 space-y-2">
+                      <div className="text-xs font-semibold text-zinc-300 flex items-center gap-1.5">
+                        <MapPin className="h-3.5 w-3.5 text-[#CBA868]" /> Caller Location
+                        <span className="ml-auto text-[10px] uppercase tracking-wider text-zinc-500">
+                          best signal: {selectedCase.location.best}
+                        </span>
+                      </div>
+                      <div className="grid sm:grid-cols-3 gap-2 text-[11px]">
+                        <div className={`rounded-lg p-2 border ${selectedCase.location.gps ? "border-emerald-500/50 bg-emerald-500/10" : "border-white/10"}`}>
+                          <div className="text-zinc-400 mb-0.5">GPS (one-tap link)</div>
+                          {selectedCase.location.gps ? (
+                            <a
+                              className="text-emerald-300 hover:underline font-mono"
+                              href={mapsUrl(`${selectedCase.location.gps.latitude},${selectedCase.location.gps.longitude}`)}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              {selectedCase.location.gps.latitude.toFixed(5)}, {selectedCase.location.gps.longitude.toFixed(5)}
+                              {selectedCase.location.gps.accuracy_m ? ` ±${Math.round(selectedCase.location.gps.accuracy_m)}m` : ""}
+                            </a>
+                          ) : selectedCase.location.link_sent_via.length > 0 ? (
+                            <span className="text-amber-300">Link sent via {selectedCase.location.link_sent_via.join(", ")}, waiting for tap</span>
+                          ) : (
+                            <span className="text-zinc-500">Not shared</span>
+                          )}
+                        </div>
+                        <div className={`rounded-lg p-2 border ${selectedCase.location.spoken_address ? "border-sky-500/50 bg-sky-500/10" : "border-white/10"}`}>
+                          <div className="text-zinc-400 mb-0.5">Caller said</div>
+                          {selectedCase.location.spoken_address ? (
+                            <a className="text-sky-300 hover:underline" href={mapsUrl(selectedCase.location.spoken_address)} target="_blank" rel="noreferrer">
+                              {selectedCase.location.spoken_address}
+                            </a>
+                          ) : (
+                            <span className="text-zinc-500">Not yet</span>
+                          )}
+                        </div>
+                        <div className="rounded-lg p-2 border border-white/10">
+                          <div className="text-zinc-400 mb-0.5">Phone network (registered area)</div>
+                          <span className="text-zinc-300">{selectedCase.location.network || "Unknown"}</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {/* PII-Redacted Conversation */}
                   <div className="space-y-2.5 max-h-60 overflow-y-auto pr-1">
