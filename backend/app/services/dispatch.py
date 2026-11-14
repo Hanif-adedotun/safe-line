@@ -50,6 +50,26 @@ async def send_photon_message(recipient: str, body: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
+async def send_twilio_voice_alert(to_phone: str, speech_text: str) -> tuple[bool, str]:
+    """Place an urgent automated outbound alert call to the caseworker."""
+    sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+    token = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+    from_phone = os.getenv("TWILIO_PHONE_NUMBER", "").strip()
+    if not (sid and token and from_phone and to_phone):
+        return False, "twilio_not_configured"
+
+    try:
+        from twilio.rest import Client
+        client = Client(sid, token)
+        escaped = speech_text.replace("<", "&lt;").replace(">", "&gt;")
+        twiml = f"<Response><Say voice='alice'>{escaped}</Say></Response>"
+        call = client.calls.create(to=to_phone, from_=from_phone, twiml=twiml)
+        return True, call.sid
+    except Exception as exc:
+        logger.warning("Twilio voice alert call failed: %s", exc)
+        return False, str(exc)
+
+
 async def dispatch_caseworker_alert(
     *,
     case_id: str,
@@ -58,7 +78,7 @@ async def dispatch_caseworker_alert(
     general_location: str | None,
     redacted_summary: str,
 ) -> list[str]:
-    """Fan out urgent Risk >= 2 alerts to Twilio SMS and/or Photon 2.0, with safe demo logging."""
+    """Fan out urgent Risk >= 2 alerts to phone voice call, SMS, and/or Photon 2.0."""
     if risk_level < 2:
         return []
 
@@ -70,15 +90,23 @@ async def dispatch_caseworker_alert(
 
     channels: list[str] = []
     if target_phone:
+        # 1. Automated urgent voice call (bypasses US carrier SMS filters)
+        speech = f"Attention: SafeLine Emergency Alert. Risk level {risk_level} detected in {general_location or 'an unspecified location'}. Category: {harm_category}."
+        call_ok, _ = await send_twilio_voice_alert(target_phone, speech)
+        if call_ok:
+            channels.append("twilio_voice_call")
+
+        # 2. Twilio SMS
         tw_ok, _ = await send_twilio_sms(target_phone, message)
         if tw_ok:
             channels.append("twilio_sms")
+
+        # 3. Photon 2.0 silent message
         ph_ok, _ = await send_photon_message(target_phone, message)
         if ph_ok:
             channels.append("photon_2_0")
 
     if not channels:
-        # Clean simulated dispatch for offline/table demo when carrier keys aren't loaded
         logger.warning("DISPATCH_SIMULATED: %s", message)
         channels.append("caseworker_queue_realtime")
 
