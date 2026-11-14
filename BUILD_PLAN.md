@@ -1,44 +1,53 @@
-# SafeLine — HackPrinceton Fall '26 Build Plan (Sat 3:30 AM → Sun 8:00 AM)
+# SafeLine — Technical Build Plan
 
-**Deadline:** Sunday, Nov 15, 2026 @ **8:00 AM EST** (Devpost + GitHub repo created Nov 13–15)  
-**Judging:** Sunday **9:30 AM – 2:30 PM** (2-min max table pitch, ≥3 general judges + Special Track judges)  
-**Repo:** `~/dev/safe-line` (commits `e421276`, `b17d1c0`)
-
----
-
-## 1. Track & Prize Stack
-- **Main Track (Required — pick 1):** **Healthcare** (Apple Watch SE 3 / member + auto-entered for **Best Overall — PS5**)
-- **Special Tracks (Stackable):**
-  1. **Photon 2.0:** Messaging + Voice Agent ($400 Winner / $300 Best Voice Agent)
-  2. **LangChain:** `deepagents` (Nintendo Switch 2)
-  3. **Amazon:** Best Practical AI Innovation ($125/person gift card)
-  4. **Arlequin AI (Track 1):** AI-Driven Forensics (AirPods 5)
-  5. **Peri:** Forward Deployed Challenge (hiring fast-track — requires partner consultation screenshot + quote)
-  6. **MLH:** Best Use of Gemini API + Best Use of Vultr
-  7. **ChatOverflow:** Coding agent leaderboard ($500/$250/$150 + raffle)
+**Goal:** 24/7 toll-free voice & Photon 2.0 silent-text child-safety reporting line with trauma-informed LangGraph triage, deterministic PII scrubbing, instant caseworker dispatch, and cross-case forensics.  
+**Repo:** `~/dev/safe-line`
 
 ---
 
-## 2. What Is Already Built & Verified
-- [x] **FastAPI Backend (`backend/app/main.py`)** + SQLite persistence (`case_store.py`)
-- [x] **LangGraph Triage Agent (`backend/app/agent/triage_agent.py`)** — `pii_scrubber` → `extract_and_score` (Gemini 2.5 Flash + deterministic safety floor) → `trauma_informed_responder` → `case_linker_and_dispatch`
-- [x] **Location Intelligence (`resolve_location_coords`)** — auto-pins NG & US locations (`lat, lng`)
-- [x] **Twilio Voice Webhook (`voice_twilio.py`)** + **Photon 2.0 Webhook (`/api/photon/webhook`)** + **Caseworker Dispatch (`dispatch.py`)**
-- [x] **40-Case Synthetic Eval (`evals/run_eval.py`)** — `100.0%` escalation recall, `0.0%` FPR, `0` raw PII leaks
-- [x] **Next.js Zoom-Out → Zoom-In → Zoom-Out UI (`frontend/src/app/page.tsx`)** — Dual-region hotspot map, live intake, LangGraph trace, Arlequin cited Q&A, live eval panel (`next build` passing, `4/4` pytest passing)
+## 1. Architecture Overview
+
+```text
+[Toll-Free Voice (Twilio)] ──► Groq Whisper STT ──┐
+[Silent Text (Photon 2.0)] ──────────────────────┼──► LangGraph Triage Agent (Vultr NJ)
+[Browser Mic / Text Demo] ───────────────────────┘        │
+                                                          ├──► 1. Deterministic PII Scrubber
+                                                          ├──► 2. Gemini 2.5 Flash + Safety Floor (Risk 0–3)
+                                                          ├──► 3. Trauma-Informed Responder (NICHD + PFA)
+                                                          ├──► 4. Location Resolver + Cross-Case Linker
+                                                          └──► 5. Caseworker Dispatch (Twilio SMS + Photon)
+                                                                     │
+                                                                     ▼
+                                                       Next.js Command Center (Zoom-Out → Zoom-In → Zoom-Out)
+```
 
 ---
 
-## 3. Remaining Execution Schedule
+## 2. Build Tiers
 
-| Window | Task | Done Criteria |
-| :--- | :--- | :--- |
-| **Sat 3:30 AM – 4:30 AM** | **Sleep / Rest or Quick Wire** | *Recommended:* Push `~/dev/safe-line` to a new public GitHub repo first, then get 4–5 hrs sleep so Sunday energy stays sharp. |
-| **Sat Morning (10:00 AM – 1:00 PM)** | **Wire Live Keys & Phone/Photon** | Add `GEMINI_API_KEY`, `GROQ_API_KEY`, `TWILIO_*`, `PHOTON_API_KEY`, `CASEWORKER_ALERT_PHONE` to `.env`. Test 1 live call on your toll-free number + 1 live Photon 2.0 silent text. |
-| **Sat Afternoon (1:00 PM – 4:00 PM)** | **Clinical Felt-Safety + Vultr Deploy** | Add the 5 NICHD / Psychological First Aid guarantees to `triage_agent.py` + UI badge. Deploy backend to **Vultr NJ** (`MLH Vultr` prize) and point Twilio webhook to it. |
-| **Sat Afternoon (4:00 PM – 6:00 PM)** | **Peri Partner Consultation** | Message/call your child-safety partner; ask where their intake workflow breaks down; save screenshot + quote for **Peri Forward Deployed** submission. |
-| **Sat Evening (6:00 PM – 9:00 PM)** | **Polish + Backup Video** | Freeze features at 6 PM. Record ≤2-min 1080p backup video showing Zoom-Out → Live Call/Text → Caseworker Phone Buzz → Cross-Case Forensics. Upload to YouTube. |
-| **Sat Night (9:00 PM – 11:00 PM)** | **Devpost Draft + Sleep** | Fill Devpost using stat-first hook, architecture diagram, `100%` eval table, partner quote, Discord handle, and all selected Special Tracks. Sleep before midnight. |
-| **Sun 7:00 AM – 8:00 AM** | **Submit Early** | Finalize Devpost **before 7:45 AM** (hard cutoff 8:00 AM). Test live demo on `puvisitor` Wi-Fi + hotspot backup. |
-| **Sun 9:30 AM – 2:30 PM** | **Judging** | Deliver the 2:00 stopwatch pitch (0:00–0:20 Hook → 0:20–1:15 Live Demo → 1:15–1:40 Tech + Eval → 1:40–2:00 E4E Scale). |
+### Tier 1 — Unbreakable Core *(Built & Passing)*
+- **FastAPI Backend (`backend/app/main.py`):** CORS, health check, macro stats, intake endpoints, SQLite persistence (`case_store.py`).
+- **Deterministic PII Scrubber (`backend/app/services/pii_scrubber.py`):** Masks phone numbers, emails, street addresses, and self-reported names before storage.
+- **LangGraph Triage Pipeline (`backend/app/agent/triage_agent.py`):** Stateful 4-node graph (`pii_scrubber` → `extract_and_score` → `generate_reply` → `persist_and_dispatch`) with Gemini 2.5 Flash + deterministic Nigerian Pidgin/English/US safety floor.
+- **Location Intelligence (`resolve_location_coords`):** Maps Nigerian & US community/school locations to `(lat, lng)` coordinates.
+- **Next.js Command Center (`frontend/src/app/page.tsx`):**
+  1. **Zoom Out (Blind Spot):** Verified macro stats + dual-region live hotspot map.
+  2. **Zoom In (Live Triage):** Voice mic / Photon silent text / 1-click presets + PII-redacted transcript + live LangGraph trace.
+  3. **Zoom Out (Forensics & Eval):** Evidence-cited investigator Q&A + live 40-case eval runner.
 
+### Tier 2 — Live Channels & Clinical Felt Safety *(Next)*
+- **Live Toll-Free Voice (`backend/app/services/voice_twilio.py`):** Wire `TWILIO_*` and `GROQ_API_KEY` in `.env`; point toll-free Twilio Voice webhook to `/api/twilio/incoming`.
+- **Live Photon 2.0 Silent Text (`backend/app/services/dispatch.py`, `/api/photon/webhook`):** Wire `PHOTON_API_KEY` for inbound silent reporting + outbound Risk ≥ 2 caseworker alerts.
+- **Clinical Felt-Safety Upgrade (`triage_agent.py` + UI):** Enforce and surface the 5 NICHD / Psychological First Aid guarantees on every response (*Believed & De-blamed*, *Zero "Why?" / Leading Questions*, *Micro-Agency*, *Transparent Handoff*, *Non-Human Clarity*).
+- **Vultr NJ Deployment:** Deploy `backend/` on a Vultr New Jersey instance for low-latency telephony + **MLH Best Use of Vultr**.
+
+### Tier 3 — Bonus Stack & Submission
+- **40-Case Synthetic Eval (`backend/evals/run_eval.py`):** Already at `100.0%` escalation recall, `0.0%` FPR, `0` raw PII leaks.
+- **Peri Forward Deployed:** Include partner consultation screenshot + quote on Devpost.
+- **Backup Demo Video:** ≤2-min screen recording of Zoom-Out → Live Call/Text → Caseworker Alert → Cross-Case Forensics.
+
+---
+
+## 3. Target HackPrinceton Tracks
+- **Main Track:** Healthcare *(auto-entered for Best Overall)*
+- **Special Tracks:** Photon 2.0 (Messaging + Best Voice Agent) · LangChain `deepagents` · Amazon Practical AI · Arlequin AI Track 1 (Forensics) · Peri Forward Deployed · MLH Gemini API · MLH Vultr · ChatOverflow
