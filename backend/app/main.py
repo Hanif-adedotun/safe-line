@@ -23,6 +23,7 @@ from app.models import (
     IntakeResponse,
 )
 from app.services import live_location
+from app.voice import voice_id
 from app.services.case_store import init_db, list_cases, query_forensics, update_case_status
 from app.services.voice_twilio import router as twilio_router, transcribe_audio_bytes
 from app.voice.caller_location import from_twilio_webhook
@@ -40,6 +41,7 @@ else:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    voice_id.preload_in_background()
     yield
 
 
@@ -177,6 +179,20 @@ async def photon_webhook(request: Request):
     return result
 
 
+@app.get("/api/voice-id/status")
+async def voice_id_status():
+    """Is the voice ID model loaded, the thresholds in use, and who is registered (masked)."""
+    return {**voice_id.model_status(), "voiceprints": voice_id.list_voiceprints()}
+
+
+@app.delete("/api/voice-id/{phone}")
+async def voice_id_forget(phone: str):
+    """'Forget my voice': delete the voiceprint stored for this phone number."""
+    if not voice_id.delete_voiceprint(phone):
+        raise HTTPException(status_code=404, detail="No voiceprint for that number")
+    return {"deleted": True}
+
+
 @app.post("/api/forensics/query", response_model=ForensicQueryResponse)
 async def forensics_query(body: ForensicQueryRequest):
     return query_forensics(body.question)
@@ -247,12 +263,16 @@ async def ws_twilio(websocket: WebSocket):
     if bridge.case_id:
         live_location.end_call(bridge.case_id)
     # When the call finishes, run the transcript through triage into the same case.
-    if transcript_accumulator:
+    # Risk is scored on the CALLER's words only. Ayo's own lines ("Are you somewhere
+    # safe to talk right now?") contain danger keywords and marked every call risk 3,
+    # firing a real caseworker alert on harmless calls.
+    caller_lines = [line for line in transcript_accumulator if line.startswith("Caller: ")]
+    if caller_lines:
         try:
             await run_intake_pipeline(
                 IntakeRequest(
                     case_id=bridge.case_id,
-                    message="\n".join(transcript_accumulator)[:4000],
+                    message="\n".join(caller_lines)[:4000],
                     channel="twilio_voice",
                     region=region,
                 )

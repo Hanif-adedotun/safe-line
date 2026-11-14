@@ -82,7 +82,30 @@ interface CaseRecord {
   trace: TraceStep[];
   location?: LocationEvidence | null;
   live_call?: boolean;
+  voice_id?: VoiceID | null;
 }
+
+interface VoiceID {
+  status: string;
+  score?: number | null;
+  threshold?: number;
+  registered_seconds?: number | null;
+  needed_seconds?: number;
+  seconds_checked?: number;
+  phone?: string;
+}
+
+const VOICE_LABEL: Record<string, { text: string; cls: string }> = {
+  recognised: { text: "Returning caller: voice recognised", cls: "border-emerald-500/50 bg-emerald-500/10 text-emerald-200" },
+  not_recognised: { text: "Voice does not match this number's registered voice (maybe someone else on this phone)", cls: "border-amber-500/50 bg-amber-500/10 text-amber-200" },
+  unsure: { text: "Not enough speech to be sure", cls: "border-white/10 text-zinc-300" },
+  registered: { text: "Voice registered: will be recognised next time", cls: "border-sky-500/50 bg-sky-500/10 text-sky-200" },
+  registering: { text: "Learning this caller's voice", cls: "border-white/10 text-zinc-300" },
+  inconsistent: { text: "Sounded like a different person from earlier samples: not added", cls: "border-white/10 text-zinc-300" },
+  too_little_speech: { text: "Caller spoke too little to check the voice", cls: "border-white/10 text-zinc-400" },
+  no_caller_id: { text: "Number withheld: voice ID off for this call", cls: "border-white/10 text-zinc-400" },
+  listening: { text: "Listening…", cls: "border-white/10 text-zinc-400" },
+};
 
 interface Citation {
   case_id: string;
@@ -573,6 +596,22 @@ export default function SafeLineApp() {
                       )}
                     </div>
                   </div>
+
+                  {/* Caller voice ID (ReDimNet2+) */}
+                  {selectedCase.voice_id && (() => {
+                    const v = selectedCase.voice_id;
+                    const l = VOICE_LABEL[v.status] || { text: v.status, cls: "border-white/10 text-zinc-300" };
+                    return (
+                      <div className={`rounded-xl border p-3 text-xs ${l.cls}`}>
+                        <div className="font-semibold text-zinc-200 mb-1">Caller Voice {v.phone ? `· ${v.phone}` : ""}</div>
+                        <div>{l.text}</div>
+                        <div className="mt-1 text-[11px] text-zinc-400">
+                          {typeof v.score === "number" && <>match score {v.score.toFixed(2)} (needs {v.threshold ?? 0.7}) · </>}
+                          {typeof v.registered_seconds === "number" && <>voiceprint built from {v.registered_seconds}s of speech{v.needed_seconds ? ` / ${v.needed_seconds}s` : ""}</>}
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {/* Caller location: every signal, strongest first */}
                   {selectedCase.location && (

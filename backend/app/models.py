@@ -97,6 +97,7 @@ class CaseRecord(BaseModel):
     trace: list[AgentTraceStep] = Field(default_factory=list)
     location: Optional[LocationEvidence] = None
     live_call: bool = False
+    voice_id: Optional[dict] = None  # caller voice ID result for this call (see app/voice/voice_id.py)
 
 
 class IntakeResponse(BaseModel):
