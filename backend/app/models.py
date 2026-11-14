@@ -58,6 +58,8 @@ class CaseRecord(BaseModel):
     risk_level: int = Field(ge=0, le=3)
     harm_category: HarmCategory
     general_location: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     who_at_risk: Optional[str] = None
     immediate_danger: bool = False
     redacted_summary: str

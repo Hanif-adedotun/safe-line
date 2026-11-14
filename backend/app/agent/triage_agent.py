@@ -34,6 +34,31 @@ HELPLINES = {
     "US": ["Childhelp National Hotline: 1-800-422-4453 (Call/Text)", "988 Lifeline / 911 Emergency"],
 }
 
+_CITY_COORDS: dict[str, tuple[float, float]] = {
+    "surulere": (6.4969, 3.3539),
+    "yaba": (6.5095, 3.3711),
+    "ikeja": (6.6018, 3.3515),
+    "ajegunle": (6.4531, 3.3298),
+    "mushin": (6.5280, 3.3541),
+    "mile 12": (6.6046, 3.3958),
+    "lagos": (6.5244, 3.3792),
+    "abuja": (9.0765, 7.3986),
+    "rivers": (4.8156, 7.0498),
+    "port harcourt": (4.8156, 7.0498),
+    "trenton": (40.2206, -74.7597),
+    "princeton": (40.3573, -74.6672),
+    "newark": (40.7357, -74.1724),
+    "camden": (39.9259, -75.1196),
+}
+
+
+def resolve_location_coords(location: str | None, region: str) -> tuple[float, float]:
+    low = (location or "").lower()
+    for key, coords in _CITY_COORDS.items():
+        if key in low:
+            return coords
+    return (6.5244, 3.3792) if region == "NG" else (40.3573, -74.6672)
+
 # Trauma-informed rules: never ask for graphic details, never promise secrecy, minimal questions.
 _SELF_HARM_RE = re.compile(
     r"\b(kill (myself|me)|want(?:s|ing)? to die|end (?:my|her|his|their) life|hurt(?:ing)? myself|no wan live|wan die|wan commot for this world|suicide)\b",
@@ -300,6 +325,7 @@ async def _node_persist_and_dispatch(state: TriageState) -> dict[str, Any]:
     merged_entities = sorted(set((existing.entities if existing else []) + ext.entities))
     merged_danger = ext.immediate_danger or (existing.immediate_danger if existing else False)
     merged_harm = ext.harm_category if ext.harm_category != "other_concern" else (existing.harm_category if existing else ext.harm_category)
+    lat, lng = resolve_location_coords(merged_loc, req.region)
 
     draft = CaseRecord(
         id=case_id,
@@ -311,6 +337,8 @@ async def _node_persist_and_dispatch(state: TriageState) -> dict[str, Any]:
         risk_level=merged_risk,
         harm_category=merged_harm,
         general_location=merged_loc,
+        latitude=lat,
+        longitude=lng,
         who_at_risk=merged_who,
         immediate_danger=merged_danger,
         redacted_summary=state["redacted_message"][:280],

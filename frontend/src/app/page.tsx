@@ -47,6 +47,8 @@ interface CaseRecord {
   risk_level: number;
   harm_category: string;
   general_location: string | null;
+  latitude: number | null;
+  longitude: number | null;
   who_at_risk: string | null;
   immediate_danger: boolean;
   redacted_summary: string;
@@ -301,7 +303,7 @@ export default function SafeLineApp() {
 
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-400">
-                Active Synthetic Reporting Clusters — Click Any Case to Zoom In
+                Live Geographic Hotspot Map — Click Any Pin to Zoom In
               </h2>
               <button
                 onClick={() => setMode("zoom_in_intake")}
@@ -309,6 +311,59 @@ export default function SafeLineApp() {
               >
                 <ZoomIn className="h-4 w-4" /> Simulate New Call / Silent Text
               </button>
+            </div>
+
+            {/* Dual-Region Live Location Plot (Nigeria + US) */}
+            <div className="grid md:grid-cols-2 gap-4">
+              {(["NG", "US"] as const).map((reg) => {
+                const regCases = cases.filter((c) => c.region === reg);
+                return (
+                  <div key={reg} className="rounded-2xl border border-white/10 bg-[#111520] p-4 space-y-3">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-semibold text-[#CBA868]">
+                        {reg === "NG" ? "Nigeria Live Node (Lagos / Rivers / Abuja)" : "US Live Node (NJ / Northeast)"}
+                      </span>
+                      <span className="text-zinc-400">{regCases.length} active report(s)</span>
+                    </div>
+                    <div className="relative h-44 rounded-xl bg-black/50 border border-white/10 overflow-hidden">
+                      {/* Subtle grid */}
+                      <div className="absolute inset-0 opacity-20 bg-[radial-gradient(#CBA868_1px,transparent_1px)] [background-size:16px_16px]" />
+                      {regCases.map((c, idx) => {
+                        const lat = c.latitude ?? (reg === "NG" ? 6.52 : 40.35);
+                        const lng = c.longitude ?? (reg === "NG" ? 3.37 : -74.66);
+                        const xPct =
+                          reg === "NG"
+                            ? Math.min(88, Math.max(12, ((lng - 3.2) / 4.5) * 70 + 15 + (idx % 3) * 6))
+                            : Math.min(88, Math.max(12, ((lng + 75.3) / 1.5) * 70 + 15 + (idx % 3) * 6));
+                        const yPct =
+                          reg === "NG"
+                            ? Math.min(82, Math.max(18, 80 - ((lat - 4.7) / 4.6) * 60 + (idx % 2) * 8))
+                            : Math.min(82, Math.max(18, 80 - ((lat - 39.8) / 1.1) * 60 + (idx % 2) * 8));
+                        return (
+                          <button
+                            key={c.id}
+                            onClick={() => {
+                              setSelectedCase(c);
+                              setMode("zoom_in_intake");
+                            }}
+                            style={{ left: `${xPct}%`, top: `${yPct}%` }}
+                            className="absolute -translate-x-1/2 -translate-y-1/2 group flex flex-col items-center"
+                          >
+                            <span
+                              className={`h-3.5 w-3.5 rounded-full border-2 border-white shadow ${
+                                c.risk_level >= 3 ? "bg-red-500 animate-pulse" : "bg-amber-400"
+                              }`}
+                            />
+                            <span className="mt-1 px-2 py-0.5 rounded bg-black/85 border border-white/15 text-[10px] text-zinc-200 whitespace-nowrap group-hover:border-[#CBA868]">
+                              {c.general_location?.split(",")[0] || c.id} · R{c.risk_level}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
 
             <div className="grid md:grid-cols-3 gap-4">
@@ -450,8 +505,13 @@ export default function SafeLineApp() {
                         </span>
                       </div>
                       <div className="text-xs text-zinc-400 mt-1">
-                        Location: <span className="text-zinc-200">{selectedCase.general_location || "Pending"}</span> · At risk:{" "}
-                        <span className="text-zinc-200">{selectedCase.who_at_risk || "Child"}</span>
+                        Location: <span className="text-zinc-200">{selectedCase.general_location || "Pending"}</span>
+                        {selectedCase.latitude && selectedCase.longitude && (
+                          <span className="font-mono text-[11px] text-zinc-500 ml-1.5">
+                            ({selectedCase.latitude.toFixed(4)}, {selectedCase.longitude.toFixed(4)})
+                          </span>
+                        )}
+                        {" · "}At risk: <span className="text-zinc-200">{selectedCase.who_at_risk || "Child"}</span>
                       </div>
                     </div>
                     <div className="text-right text-xs">
@@ -623,3 +683,4 @@ export default function SafeLineApp() {
     </div>
   );
 }
+
