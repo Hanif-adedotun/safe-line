@@ -41,3 +41,4 @@
 | **Sat Night (9:00 PM – 11:00 PM)** | **Devpost Draft + Sleep** | Fill Devpost using stat-first hook, architecture diagram, `100%` eval table, partner quote, Discord handle, and all selected Special Tracks. Sleep before midnight. |
 | **Sun 7:00 AM – 8:00 AM** | **Submit Early** | Finalize Devpost **before 7:45 AM** (hard cutoff 8:00 AM). Test live demo on `puvisitor` Wi-Fi + hotspot backup. |
 | **Sun 9:30 AM – 2:30 PM** | **Judging** | Deliver the 2:00 stopwatch pitch (0:00–0:20 Hook → 0:20–1:15 Live Demo → 1:15–1:40 Tech + Eval → 1:40–2:00 E4E Scale). |
+
