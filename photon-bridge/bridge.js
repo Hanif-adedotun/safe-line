@@ -25,7 +25,7 @@ console.log("Photon Spectrum connected to project:", process.env.SPECTRUM_PROJEC
       if (message.direction !== "inbound") continue;
       const text = message.content?.text || "";
       if (!text) continue;
-      console.log(`[iMessage in] ${text.length} chars`);
+      console.log(`[iMessage in] from ${maskHandle(message.sender?.id)} (${text.length} chars)`);
       try {
         const res = await fetch(`${BACKEND}/api/photon/webhook`, {
           method: "POST",
@@ -52,8 +52,35 @@ console.log("Photon Spectrum connected to project:", process.env.SPECTRUM_PROJEC
   }
 })();
 
+// Shows whether Apple reports a phone number or an email for a sender, without
+// logging the full handle: "+1•••7048" or "n•••@gmail.com".
+function maskHandle(h) {
+  if (!h) return "unknown";
+  h = String(h).replace(/^.*;-;/, "");
+  if (h.includes("@")) return `${h[0]}•••@${h.split("@")[1]}`;
+  return `${h.slice(0, 2)}•••${h.slice(-4)}`;
+}
+
+// Free/Pro Photon projects only message registered users. Register the
+// recipient first (idempotent: re-creating an existing phone returns it).
+// Set PHOTON_AUTO_REGISTER=0 to turn this off.
+async function ensureRegistered(phone) {
+  if (process.env.PHOTON_AUTO_REGISTER === "0" || !/^\+[1-9]\d{6,14}$/.test(phone)) return;
+  const id = process.env.SPECTRUM_PROJECT_ID;
+  const auth = Buffer.from(`${id}:${process.env.SPECTRUM_PROJECT_SECRET}`).toString("base64");
+  const res = await fetch(`https://spectrum.photon.codes/projects/${id}/users/`, {
+    method: "POST",
+    headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "shared", phoneNumber: phone }),
+  });
+  if (!res.ok) {
+    console.warn(`[photon users] register ${maskHandle(phone)} failed: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+  }
+}
+
 // 2. Outbound: POST /send {recipient: "+1555...", text} from the Python backend
 async function sendTo(recipient, text) {
+  await ensureRegistered(recipient);
   const space = await im.space.create(recipient);
   return space.send(text);
 }
@@ -76,11 +103,11 @@ const server = http.createServer((req, res) => {
       if (!recipient || !text) return reply(400, { ok: false, error: "recipient_and_text_required" });
       try {
         await sendTo(recipient, text);
-        console.log(`[iMessage out] sent to ...${String(recipient).slice(-4)}`);
+        console.log(`[iMessage out] sent to ${maskHandle(recipient)}`);
         reply(200, { ok: true });
       } catch (err) {
         // Report failure honestly so the backend can fall back to SMS.
-        console.warn(`[iMessage out] failed to ...${String(recipient).slice(-4)}: ${err.message}`);
+        console.warn(`[iMessage out] failed to ${maskHandle(recipient)}: ${err.message}`);
         reply(502, { ok: false, error: err.message });
       }
     });
