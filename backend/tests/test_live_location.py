@@ -26,7 +26,7 @@ from app.voice import twilio_stream
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(case_store, "DB_PATH", tmp_path / "test.db")
-    for var in ("CASEWORKER_ALERT_PHONE", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "GEMINI_API_KEY", "PUBLIC_BASE_URL", "DASHBOARD_KEY"):
+    for var in ("CASEWORKER_ALERT_PHONE", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "GEMINI_API_KEY", "PUBLIC_BASE_URL", "LINK_BASE_URL", "DASHBOARD_KEY"):
         monkeypatch.setenv(var, "")
     live_location.reset_for_tests()
     yield
@@ -287,3 +287,19 @@ def test_case_data_blocked_through_tunnel_but_public_routes_open():
         assert c.get("/api/health", headers=tunnel).status_code == 200
         assert c.post("/voice/incoming", data={"From": "+16095551234"}, headers=tunnel).status_code == 200
         assert c.get("/api/cases").status_code == 200  # local dashboard
+
+
+def test_link_base_url_overrides_webhook_host(monkeypatch):
+    import app.services.dispatch as dispatch
+
+    sent = []
+
+    async def fake_photon(recipient, body):
+        sent.append(body)
+        return True, "ok"
+
+    monkeypatch.setattr(dispatch, "send_photon_message", fake_photon)
+    monkeypatch.setenv("LINK_BASE_URL", "https://abc.trycloudflare.com/")
+    call = _open_call()
+    asyncio.run(live_location.send_location_link(call.case_id))
+    assert sent[0].split()[-1].startswith("https://abc.trycloudflare.com/l/")

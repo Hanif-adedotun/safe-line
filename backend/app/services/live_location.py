@@ -239,7 +239,10 @@ def token_case_id(token: str) -> Optional[str]:
 
 
 def _public_base(call: Optional[LiveCall]) -> Optional[str]:
-    configured = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    # LINK_BASE_URL lets the caller-facing link use a different tunnel from the
+    # Twilio webhook: free ngrok shows browsers a warning page (ERR_NGROK_6024)
+    # before ours, a Cloudflare quick tunnel does not.
+    configured = (os.getenv("LINK_BASE_URL") or os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
     if configured:
         return configured
     return call.public_base_url if call else None
