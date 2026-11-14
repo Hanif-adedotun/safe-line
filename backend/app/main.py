@@ -34,7 +34,7 @@ PROMPT_PATH = Path(__file__).parent / "prompts" / "safeline_prompt.md"
 if PROMPT_PATH.exists():
     SYSTEM_PROMPT = PROMPT_PATH.read_text(encoding="utf-8")
 else:
-    SYSTEM_PROMPT = "You are SafeLine, a warm, calm, trauma-informed AI voice companion for youth."
+    SYSTEM_PROMPT = "You are Ayo, the voice of SafeLine, a warm, calm, trauma-informed AI voice companion for youth."
 
 
 @asynccontextmanager
