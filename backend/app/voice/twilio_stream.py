@@ -27,18 +27,10 @@ from app.services import live_location
 from app.voice.audio import Downsample24kTo8k, FrameChunker, mulaw_to_pcm16, pcm16_to_mulaw
 from app.voice.caller_location import CallerLocation, build_location_briefing
 from app.voice.gemini_live import GeminiLiveSession, LiveConfig
-from app.voice.voice_id import CallVoiceID
-from app.services.case_store import get_case, save_case
 
 logger = logging.getLogger("safeline.voice.twilio")
 
 PUBLIC_BASE_PARAM = "sl_public_base"
-RETURNING_CALLER_CUE = (
-    "[SYSTEM NOTE, not spoken by the caller] Voice ID: this caller's voice matches someone who "
-    "has called this line before. You may warmly say it is good to hear from them again. Do not "
-    "mention voices, recordings or matching, and do not repeat anything from earlier calls unless "
-    "they bring it up."
-)
 CALL_STARTED_CUE = (
     "[SYSTEM NOTE, not spoken by the caller] The call has just connected. Greet the caller "
     "now, following your opening instructions."
@@ -68,7 +60,6 @@ class TwilioMediaBridge:
         self._running = False
         self._outbound_queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._tasks: list[asyncio.Task] = []
-        self.voice_id: Optional[CallVoiceID] = None
 
     async def run(self):
         self._running = True
@@ -86,8 +77,6 @@ class TwilioMediaBridge:
                     if payload and self.gemini_session:
                         pcm16 = mulaw_to_pcm16(base64.b64decode(payload))
                         await self.gemini_session.send_audio(pcm16)
-                        if self.voice_id:
-                            self.voice_id.feed(pcm16)
 
                 elif event == "stop":
                     logger.info("Twilio call stopped")
@@ -101,11 +90,6 @@ class TwilioMediaBridge:
             self._running = False
             if self.case_id:
                 live_location.attach_injector(self.case_id, None)
-            if self.voice_id:
-                try:
-                    await self._on_voice_id(await self.voice_id.finish())
-                except Exception:
-                    logger.exception("Voice ID finish failed")
             if self.gemini_session:
                 await self.gemini_session.close()
             for task in self._tasks:
@@ -131,7 +115,6 @@ class TwilioMediaBridge:
             public_base_url=public_base,
         )
         self.case_id = live_call.case_id
-        self.voice_id = CallVoiceID(self.caller_location.number, on_result=self._on_voice_id)
 
         case_id = self.case_id
 
@@ -165,19 +148,6 @@ class TwilioMediaBridge:
         # Gemini Live does not speak until it hears something; make it greet first.
         await self.gemini_session.send_realtime_text(CALL_STARTED_CUE)
         return True
-
-    async def _on_voice_id(self, result: dict) -> None:
-        """Save the voice ID result on the case; tell Ayo (quietly) about a returning caller."""
-        if self.case_id:
-            case = await asyncio.to_thread(get_case, self.case_id)
-            if case:
-                case.voice_id = result
-                await asyncio.to_thread(save_case, case)
-        if result.get("status") == "recognised" and self.gemini_session and self._running:
-            try:
-                await self.gemini_session.send_realtime_text(RETURNING_CALLER_CUE)
-            except Exception:
-                logger.warning("Could not tell Ayo about the returning caller")
 
     def _on_gemini_audio_chunk(self, pcm24k_chunk: bytes):
         """Called synchronously when Gemini Live receives a 24kHz audio chunk."""

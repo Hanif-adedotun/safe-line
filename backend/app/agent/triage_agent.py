@@ -361,7 +361,6 @@ async def _node_persist_and_dispatch(state: TriageState) -> dict[str, Any]:
         trace=[],
         location=live_loc,
         live_call=existing.live_call if existing else False,
-        voice_id=existing.voice_id if existing else None,
     )
 
     linked = find_linked_cases(draft)
