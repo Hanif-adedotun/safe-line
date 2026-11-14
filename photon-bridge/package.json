@@ -1,0 +1,8 @@
+{
+  "name": "safeline-photon-bridge",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "spectrum-ts": "^12.16.0"
+  }
+}

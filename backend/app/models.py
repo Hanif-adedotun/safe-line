@@ -4,7 +4,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
-ChannelType = Literal["voice_call", "web_mic", "photon_sms", "web_text"]
+ChannelType = Literal["voice_call", "twilio_voice", "web_mic", "photon_sms", "photon_imessage", "web_text"]
 CaseStatus = Literal["open", "reviewing", "actioned", "closed"]
 HarmCategory = Literal[
     "physical_abuse",

@@ -32,21 +32,18 @@ async def send_twilio_sms(to_phone: str, body: str) -> tuple[bool, str]:
 
 
 async def send_photon_message(recipient: str, body: str) -> tuple[bool, str]:
-    api_key = os.getenv("PHOTON_API_KEY", "").strip()
-    base_url = os.getenv("PHOTON_BASE_URL", "https://api.photon.codes/v2").strip().rstrip("/")
-    if not (api_key and recipient):
-        return False, "photon_not_configured"
-
+    """Dispatch an outbound iMessage alert via the Photon 2.0 local bridge."""
     try:
-        async with httpx.AsyncClient(timeout=6.0) as client:
+        async with httpx.AsyncClient(timeout=4.0) as client:
             resp = await client.post(
-                f"{base_url}/messages",
-                json={"to": recipient, "text": body[:1500]},
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                "http://localhost:8001/send",
+                json={"recipient": recipient, "text": body[:1500]},
             )
-            return 200 <= resp.status_code < 300, f"photon_http_{resp.status_code}"
+            if resp.status_code == 200:
+                return True, "photon_dispatched"
+            return False, f"photon_http_{resp.status_code}"
     except Exception as exc:
-        logger.warning("Photon dispatch failed: %s", exc)
+        logger.warning("Photon bridge dispatch failed: %s", exc)
         return False, str(exc)
 
 

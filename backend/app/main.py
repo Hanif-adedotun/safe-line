@@ -119,17 +119,39 @@ class PhotonInbound(BaseModel):
     region: Literal["NG", "US"] = "NG"
 
 
-@app.post("/api/photon/webhook", response_model=IntakeResponse)
-async def photon_webhook(payload: PhotonInbound):
-    """Photon 2.0 silent text/iMessage inbound webhook."""
-    return await run_intake_pipeline(
+@app.post("/api/photon/webhook")
+async def photon_webhook(request: Request):
+    """Photon 2.0 silent text / iMessage inbound webhook."""
+    data = await request.json()
+
+    text = ""
+    sender_id = "anonymous"
+    case_id = None
+    region = "US"
+
+    if "message" in data and isinstance(data["message"], dict):
+        msg = data["message"]
+        content = msg.get("content", {})
+        text = content.get("text") or ""
+        sender_id = (msg.get("sender") or {}).get("id") or "anonymous"
+    elif "text" in data:
+        text = data["text"]
+        sender_id = data.get("sender_id") or "anonymous"
+        case_id = data.get("case_id")
+        region = data.get("region", "US")
+
+    if not text:
+        return {"status": "ignored", "reason": "empty_text"}
+
+    result = await run_intake_pipeline(
         IntakeRequest(
-            case_id=payload.case_id,
-            message=payload.text,
-            channel="photon_sms",
-            region=payload.region,
+            case_id=case_id,
+            message=text,
+            channel="photon_imessage",
+            region=region,
         )
     )
+    return result
 
 
 @app.post("/api/forensics/query", response_model=ForensicQueryResponse)
