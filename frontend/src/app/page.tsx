@@ -592,6 +592,18 @@ export default function SafeLineApp() {
                             </a>
                           ) : selectedCase.location.link_sent_via.length > 0 ? (
                             <span className="text-amber-300">Link sent via {selectedCase.location.link_sent_via.join(", ")}, waiting for tap</span>
+                          ) : selectedCase.live_call ? (
+                            <button
+                              onClick={async () => {
+                                const r = await fetch(`${API_BASE}/api/cases/${selectedCase.id}/location-link`, { method: "POST" });
+                                const d = await r.json().catch(() => ({}));
+                                if (!r.ok || !d.sent) alert(`Link not sent: ${d.reason || d.detail || r.status}`);
+                                refreshCases();
+                              }}
+                              className="px-2 py-1 rounded bg-[#CBA868] text-black font-semibold"
+                            >
+                              Send location link
+                            </button>
                           ) : (
                             <span className="text-zinc-500">Not shared</span>
                           )}

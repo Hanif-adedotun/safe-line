@@ -306,6 +306,15 @@ class GpsPayload(BaseModel):
     accuracy_m: float | None = None
 
 
+@app.post("/api/cases/{case_id}/location-link")
+async def caseworker_send_location_link(case_id: str):
+    """Dashboard button: text the caller on a live call the one-tap GPS link.
+    Case-data route, so it is refused through the public tunnel."""
+    if not live_location.get_live_call(case_id):
+        raise HTTPException(status_code=409, detail="Case is not on a live call")
+    return await live_location.send_location_link(case_id)
+
+
 @app.post("/api/l/{token}")
 async def location_link_submit(token: str, body: GpsPayload):
     case = await live_location.record_gps(token, body.latitude, body.longitude, body.accuracy_m)
