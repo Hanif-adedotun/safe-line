@@ -81,8 +81,10 @@ class CaseRecord(BaseModel):
     channel: ChannelType
     region: Literal["NG", "US"]
     status: CaseStatus = "open"
-    risk_level: int = Field(ge=0, le=3)
-    harm_category: HarmCategory
+    # LEGACY risk fields (old regex/Gemini 0-3 scorer). Kept for old records;
+    # the safeguarding lane uses `assessment` + `decision` instead.
+    risk_level: int = Field(default=0, ge=0, le=3)
+    harm_category: HarmCategory = "other_concern"
     general_location: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
@@ -97,6 +99,10 @@ class CaseRecord(BaseModel):
     trace: list[AgentTraceStep] = Field(default_factory=list)
     location: Optional[LocationEvidence] = None
     live_call: bool = False
+    # Safeguarding lane (System 1 output, System 2 output, linked review item)
+    assessment: Optional[dict] = None
+    decision: Optional[dict] = None
+    review_item_id: Optional[str] = None
 
 
 class IntakeResponse(BaseModel):

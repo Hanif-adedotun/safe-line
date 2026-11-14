@@ -13,7 +13,11 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from xml.sax.saxutils import quoteattr
 from pydantic import BaseModel
 
-from app.agent.triage_agent import run_intake_pipeline
+# Safeguarding lane: System 1 (assess) -> System 2 (policy) replaces the legacy
+# Risk 0-3 scorer in app/agent/triage_agent.py (kept, not used here).
+from app.safeguarding import store as sg_store
+from app.safeguarding.pipeline import LiveAssessor, run_text_intake as run_intake_pipeline
+from app.safeguarding.policy import POLICY_VERSION, RULES
 from app.models import (
     CaseRecord,
     CaseStatus,
@@ -94,7 +98,7 @@ async def macro_stats():
         "abuser_known_pct": "88%",
         "us_988_understaffed_pct": "71%",
         "live_cases_total": len(cases),
-        "live_high_risk_cases": sum(1 for c in cases if c.risk_level >= 2),
+        "open_review_items": sum(1 for i in sg_store.list_review_items() if i.status == "open"),
     }
 
 
@@ -142,6 +146,10 @@ class PhotonInbound(BaseModel):
     region: Literal["NG", "US"] = "NG"
 
 
+# One running session per texting sender (in memory; demo).
+_text_sessions: dict[str, str] = {}
+
+
 @app.post("/api/photon/webhook")
 async def photon_webhook(request: Request):
     """Photon 2.0 silent text / iMessage inbound webhook."""
@@ -166,14 +174,17 @@ async def photon_webhook(request: Request):
     if not text:
         return {"status": "ignored", "reason": "empty_text"}
 
+    case_id = case_id or _text_sessions.get(sender_id)
     result = await run_intake_pipeline(
         IntakeRequest(
             case_id=case_id,
-            message=text,
+            message=text[:4000],
             channel="photon_imessage",
             region=region,
         )
     )
+    if sender_id != "anonymous":
+        _text_sessions[sender_id] = result.case.id
     return result
 
 
@@ -227,13 +238,17 @@ async def ws_twilio(websocket: WebSocket):
     """Twilio Media Streams full-duplex WebSocket endpoint."""
     await websocket.accept()
 
-    transcript_accumulator: list[str] = []
+    assessor: LiveAssessor | None = None
 
     async def on_turn(caller_text: str, model_text: str):
-        if caller_text:
-            transcript_accumulator.append(f"Caller: {caller_text}")
-        if model_text:
-            transcript_accumulator.append(f"SafeLine: {model_text}")
+        # System 1 + 2 re-run after each caller turn, off the audio path.
+        nonlocal assessor
+        if not bridge.case_id:
+            return
+        if assessor is None:
+            live = live_location.get_live_call(bridge.case_id)
+            assessor = LiveAssessor(bridge.case_id, inject=live.inject if live else None)
+        assessor.add_turn(caller_text, model_text)
 
     bridge = TwilioMediaBridge(
         websocket=websocket,
@@ -243,22 +258,10 @@ async def ws_twilio(websocket: WebSocket):
     )
     await bridge.run()
 
-    region = "NG" if (bridge.caller_location and bridge.caller_location.country == "NG") else "US"
+    if assessor is not None:
+        await assessor.finish()
     if bridge.case_id:
         live_location.end_call(bridge.case_id)
-    # When the call finishes, run the transcript through triage into the same case.
-    if transcript_accumulator:
-        try:
-            await run_intake_pipeline(
-                IntakeRequest(
-                    case_id=bridge.case_id,
-                    message="\n".join(transcript_accumulator)[:4000],
-                    channel="twilio_voice",
-                    region=region,
-                )
-            )
-        except Exception:
-            logging.getLogger("safeline").exception("Post-call triage failed case=%s", bridge.case_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -323,9 +326,52 @@ async def location_link_submit(token: str, body: GpsPayload):
     return {"ok": True}
 
 
+# --------------------------------------------------------------------------- #
+# Safeguarding lane: review queue, audit, policy, demo tools
+# --------------------------------------------------------------------------- #
+@app.get("/api/review-items")
+async def get_review_items():
+    return [i.model_dump() for i in sg_store.list_review_items()]
+
+
+class ReviewBody(BaseModel):
+    disposition: str
+    note: str | None = None
+    corrected_categories: list[str] | None = None
+
+
+@app.post("/api/review-items/{item_id}/review")
+async def review_item(item_id: str, body: ReviewBody):
+    try:
+        item = sg_store.mark_reviewed(item_id, body.disposition, body.note, body.corrected_categories)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"disposition must be one of {sg_store.DISPOSITIONS}")
+    if not item:
+        raise HTTPException(status_code=404, detail="Review item not found")
+    return item.model_dump()
+
+
+@app.get("/api/audit")
+async def get_audit(session_id: str | None = None):
+    return sg_store.list_audit(session_id)
+
+
+@app.get("/api/policy")
+async def get_policy():
+    return {"policy_version": POLICY_VERSION, "rules": RULES, "dispositions": sg_store.DISPOSITIONS,
+            "note": "DEMO policy. Not a real reporting protocol."}
+
+
+@app.post("/api/demo/reset")
+async def demo_reset():
+    sg_store.reset_demo_data()
+    return {"ok": True}
+
+
 @app.post("/api/eval/run")
 async def run_eval_endpoint():
-    from evals.run_eval import run_benchmark
+    """Runs the synthetic safeguarding suite (calls the real System 1 model)."""
+    from evals.safeguarding_eval import run_suite
 
-    return await run_benchmark()
+    return await run_suite()
 
