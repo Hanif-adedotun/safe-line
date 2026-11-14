@@ -4,8 +4,9 @@ import os
 from contextlib import asynccontextmanager
 from typing import Literal
 
+from pathlib import Path
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -20,8 +21,15 @@ from app.models import (
 )
 from app.services.case_store import init_db, list_cases, query_forensics, update_case_status
 from app.services.voice_twilio import router as twilio_router, transcribe_audio_bytes
+from app.voice.twilio_stream import TwilioMediaBridge
 
 load_dotenv()
+
+PROMPT_PATH = Path(__file__).parent / "prompts" / "sabi_safe_prompt.md"
+if PROMPT_PATH.exists():
+    SYSTEM_PROMPT = PROMPT_PATH.read_text(encoding="utf-8")
+else:
+    SYSTEM_PROMPT = "You are SafeLine, a warm, calm, trauma-informed AI voice companion for youth."
 
 
 @asynccontextmanager
@@ -127,6 +135,56 @@ async def photon_webhook(payload: PhotonInbound):
 @app.post("/api/forensics/query", response_model=ForensicQueryResponse)
 async def forensics_query(body: ForensicQueryRequest):
     return query_forensics(body.question)
+
+
+@app.api_route("/voice/incoming", methods=["GET", "POST"])
+async def voice_incoming(request: Request):
+    """Twilio Inbound Voice Webhook for real-time full-duplex calls."""
+    host = request.headers.get("host", "localhost:8000")
+    protocol = "wss" if "https" in str(request.base_url) else "ws"
+    twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Connect>
+        <Stream url="{protocol}://{host}/ws/twilio" />
+    </Connect>
+</Response>"""
+    return Response(content=twiml_response, media_type="application/xml")
+
+
+@app.websocket("/ws/twilio")
+async def ws_twilio(websocket: WebSocket):
+    """Twilio Media Streams full-duplex WebSocket endpoint."""
+    await websocket.accept()
+
+    transcript_accumulator: list[str] = []
+
+    async def on_turn(caller_text: str, model_text: str):
+        if caller_text:
+            transcript_accumulator.append(f"Caller: {caller_text}")
+        if model_text:
+            transcript_accumulator.append(f"SafeLine: {model_text}")
+
+    bridge = TwilioMediaBridge(
+        websocket=websocket,
+        system_prompt=SYSTEM_PROMPT,
+        voice_name=os.getenv("GEMINI_VOICE", "Puck"),
+        on_turn_complete=on_turn,
+    )
+    await bridge.run()
+
+    # When call finishes, automatically process through the triage pipeline
+    if transcript_accumulator:
+        full_transcript = "\n".join(transcript_accumulator)
+        try:
+            await run_intake_pipeline(
+                IntakeRequest(
+                    message=full_transcript,
+                    channel="twilio_voice",
+                    region="US" if bridge.call_sid else "NG",
+                )
+            )
+        except Exception as e:
+            pass
 
 
 @app.post("/api/eval/run")
