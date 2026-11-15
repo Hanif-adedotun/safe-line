@@ -10,3 +10,7 @@ dist/
 .DS_Store
 
 *.log
+
+# build artifacts / local archives
+frontend/tsconfig.tsbuildinfo
+frontend/brand-archive/
