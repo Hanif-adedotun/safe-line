@@ -147,6 +147,9 @@ class TwilioMediaBridge:
         self._tasks.append(asyncio.create_task(self._outbound_sender()))
         # Gemini Live does not speak until it hears something; make it greet first.
         await self.gemini_session.send_realtime_text(CALL_STARTED_CUE)
+        # Text the one-tap location link straight away (no permission step), in
+        # the background so the greeting is never delayed.
+        live_location.start_auto_link(self.case_id)
         return True
 
     def _on_gemini_audio_chunk(self, pcm24k_chunk: bytes):

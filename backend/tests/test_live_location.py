@@ -138,7 +138,7 @@ def test_stream_start_opens_live_case_with_location_and_greets(monkeypatch):
 
     gem = FakeGemini.instances[-1]
     assert "CALLER CONTEXT" in gem.cfg.system_prompt and "PRINCETON" in gem.cfg.system_prompt
-    assert {t["name"] for t in gem.cfg.tools} == {"record_caller_location", "send_location_link"}
+    assert {t["name"] for t in gem.cfg.tools} == {"record_caller_location", "location_link_status", "send_location_link"}
     assert gem.texts and "call has just connected" in gem.texts[0]
 
     case = case_store.get_case(bridge.case_id)
@@ -303,3 +303,80 @@ def test_link_base_url_overrides_webhook_host(monkeypatch):
     call = _open_call()
     asyncio.run(live_location.send_location_link(call.case_id))
     assert sent[0].split()[-1].startswith("https://abc.trycloudflare.com/l/")
+
+
+# --------------------------------------------------------------------------- #
+# Automatic link on connect + the status tool (Ayo only mentions a link that was really sent)
+# --------------------------------------------------------------------------- #
+def _fake_photon(monkeypatch, ok=True):
+    import app.services.dispatch as dispatch
+
+    sent = []
+
+    async def fake(recipient, body):
+        sent.append((recipient, body))
+        return (ok, "photon_dispatched" if ok else "photon_http_502")
+
+    monkeypatch.setattr(dispatch, "send_photon_message", fake)
+    return sent
+
+
+@pytest.mark.parametrize("delivered", [True, False])
+def test_status_tool_gives_the_words_only_when_a_link_really_went_out(monkeypatch, delivered):
+    _fake_photon(monkeypatch, ok=delivered)
+    call = _open_call()
+
+    async def go():
+        live_location.start_auto_link(call.case_id)
+        return await live_location.handle_tool_call(call.case_id, "location_link_status", {})
+
+    out = asyncio.run(go())
+    assert bool(out["also_say"]) is delivered and out["location_shared"] is False
+    if delivered:
+        assert "link" in out["also_say"]
+
+
+def test_status_tool_goes_quiet_once_the_child_has_shared_their_location(monkeypatch):
+    _fake_photon(monkeypatch)
+    call = _open_call()
+
+    async def go():
+        live_location.start_auto_link(call.case_id)
+        before = await live_location.handle_tool_call(call.case_id, "location_link_status", {})
+        token = live_location.issue_link_token(call.case_id)
+        await live_location.record_gps(token, 40.3487, -74.6593, 12.0)
+        after = await live_location.handle_tool_call(call.case_id, "location_link_status", {})
+        return before, after
+
+    before, after = asyncio.run(go())
+    assert before["also_say"] and not after["also_say"] and after["location_shared"] is True
+
+
+def test_auto_link_can_be_switched_off(monkeypatch):
+    sent = _fake_photon(monkeypatch)
+    monkeypatch.setenv("AUTO_LOCATION_LINK", "0")
+    call = _open_call()
+
+    async def go():
+        live_location.start_auto_link(call.case_id)
+        return await live_location.handle_tool_call(call.case_id, "location_link_status", {})
+
+    assert asyncio.run(go())["also_say"] == "" and sent == []
+
+
+def test_a_call_connecting_sends_the_link_once_with_no_permission_step(monkeypatch):
+    sent = _fake_photon(monkeypatch)
+    monkeypatch.setattr(twilio_stream, "GeminiLiveSession", FakeGemini)
+    params = cl.CallerLocation(number="+16095551234", city="PRINCETON", state="NJ", country="US", source="twilio").to_custom_parameters()
+    params["sl_public_base"] = "https://demo.ngrok-free.dev"
+    ws = FakeWS([{"event": "start", "start": {"streamSid": "MZ1", "callSid": "CA1", "customParameters": params}}, {"event": "stop"}])
+    bridge = twilio_stream.TwilioMediaBridge(ws, system_prompt="BASE", voice_name="Kore")
+
+    async def go():
+        await bridge.run()
+        await live_location.get_live_call(bridge.case_id).auto_link  # the background send, finished
+
+    asyncio.run(go())
+    assert len(sent) == 1 and sent[0][0] == "+16095551234"
+    assert sent[0][1].split()[-1].startswith("https://demo.ngrok-free.dev/l/")
+    assert case_store.get_case(bridge.case_id).location.link_sent_via == ["imessage"]

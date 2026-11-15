@@ -7,7 +7,8 @@ Three location signals, from weakest to strongest:
               not where the caller is standing.
 2. spoken   - the address or landmark the caller gives when the voice agent
               asks. The agent saves it with the `record_caller_location` tool.
-3. gps      - one-tap link sent by iMessage (Photon) after the caller agrees.
+3. gps      - one-tap link sent by iMessage (Photon) automatically when the
+              call connects (AUTO_LOCATION_LINK, default on); the agent can re-send.
               Twilio is never used to text the caller: Twilio has no live
               device-location API (its From* fields are number lookups), and
               its own Flex geolocation guide uses this same link approach. The page reads navigator.geolocation and posts it
@@ -23,6 +24,7 @@ caseworker gets the raw text plus a maps link they open themselves.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import secrets
@@ -58,6 +60,7 @@ class LiveCall:
     public_base_url: Optional[str]
     inject: Optional[Injector] = None
     tokens: set[str] = field(default_factory=set)
+    auto_link: Optional["asyncio.Task[dict]"] = None
 
 
 @dataclass
@@ -249,8 +252,7 @@ def _public_base(call: Optional[LiveCall]) -> Optional[str]:
 
 
 async def send_location_link(case_id: str) -> dict[str, Any]:
-    """iMessage the caller a one-tap link via Photon. No Twilio SMS fallback.
-    The agent must have the caller's agreement before calling this."""
+    """iMessage the caller a one-tap link via Photon. No Twilio SMS fallback."""
     from app.services.dispatch import send_photon_message
 
     call = _calls.get(case_id)
@@ -343,20 +345,68 @@ TOOL_DECLARATIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "location_link_status",
+        "description": (
+            "Silent check, never mention it. You MUST call this right before you ask the caller where "
+            "they are. Returns also_say: if it is not empty, say exactly those words right after "
+            "asking where they are; if it is empty, say nothing at all about a link."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}},
+    },
+    {
         "name": "send_location_link",
         "description": (
-            "Send the caller an iMessage with a one-tap link that shares their exact location. Only call "
-            "this after the caller clearly says yes to receiving a text AND says it is safe for "
-            "a text to arrive on this phone. Never call it without that agreement."
+            "Re-send the one-tap location link to the caller's phone. A link is already sent "
+            "automatically when the call starts; use this only if the caller says they did not get it "
+            "or asks for it again."
         ),
         "parameters": {"type": "OBJECT", "properties": {}},
     },
 ]
 
 
+def auto_link_enabled() -> bool:
+    return os.getenv("AUTO_LOCATION_LINK", "1").strip().lower() not in ("0", "false", "off", "no")
+
+
+def start_auto_link(case_id: str) -> None:
+    """Send the location link as soon as the call connects (no permission step),
+    in the background. The agent asks location_link_status before mentioning it,
+    so Ayo never talks about a link the child didn't get. (Injecting a text note
+    instead made Gemini speak it aloud, e.g. "(No response needed.)".)"""
+    call = _calls.get(case_id)
+    if not call or not auto_link_enabled():
+        return
+    call.auto_link = asyncio.create_task(send_location_link(case_id))
+
+
+# The words only exist in the tool result, so Ayo can only say them when a link
+# really reached the child's phone. (With the sentence in the prompt, the model
+# said it even when no link was sent.)
+_ALSO_SAY = "I've also sent a link to your phone. If you can, open it and tap Share, so help can find you."
+
+
+async def location_link_status(case_id: str) -> dict[str, Any]:
+    call = _calls.get(case_id)
+    case = get_case(case_id)
+    gps = bool(case and case.location and case.location.gps)
+    if call and call.auto_link is not None:
+        try:
+            result = await asyncio.wait_for(asyncio.shield(call.auto_link), timeout=4)
+        except asyncio.TimeoutError:
+            return {"also_say": "", "location_shared": gps}
+        except Exception:
+            result = {"sent": False}
+        return {"also_say": _ALSO_SAY if result.get("sent") and not gps else "", "location_shared": gps}
+    sent = bool(case and case.location and case.location.link_sent_via)
+    return {"also_say": _ALSO_SAY if sent and not gps else "", "location_shared": gps}
+
+
 async def handle_tool_call(case_id: str, name: str, args: dict[str, Any]) -> dict[str, Any]:
     if name == "record_caller_location":
         return record_spoken_address(case_id, str(args.get("address") or ""))
+    if name == "location_link_status":
+        return await location_link_status(case_id)
     if name == "send_location_link":
         return await send_location_link(case_id)
     return {"error": "unknown_tool"}
