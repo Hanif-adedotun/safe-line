@@ -150,6 +150,7 @@ class TwilioMediaBridge:
         # Text the one-tap location link straight away (no permission step), in
         # the background so the greeting is never delayed.
         live_location.start_auto_link(self.case_id)
+        live_location.start_simulated_lookup(self.case_id)
         return True
 
     def _on_gemini_audio_chunk(self, pcm24k_chunk: bytes):

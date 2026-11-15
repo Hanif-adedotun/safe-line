@@ -319,6 +319,27 @@ async def caseworker_send_location_link(case_id: str):
     return await live_location.send_location_link(case_id)
 
 
+@app.get("/api/sim/profiles")
+async def simulated_profiles():
+    """Seeded profiles for the device-location demo feed (fictional children)."""
+    from app.services import simulated_device_location as sim
+
+    return sim.list_profiles()
+
+
+class SimLocationBody(BaseModel):
+    profile_id: str | None = None
+
+
+@app.post("/api/cases/{case_id}/simulate-device-location")
+async def simulate_device_location(case_id: str, body: SimLocationBody | None = None):
+    """Dashboard button: the device-location feed answers for this case (seeded demo data)."""
+    result = await live_location.attach_simulated_device_location(case_id, body.profile_id if body else None)
+    if not result.get("attached"):
+        raise HTTPException(status_code=409 if result.get("reason") == "no_profile" else 404, detail=result.get("reason"))
+    return result
+
+
 @app.post("/api/l/{token}")
 async def location_link_submit(token: str, body: GpsPayload):
     case = await live_location.record_gps(token, body.latitude, body.longitude, body.accuracy_m)

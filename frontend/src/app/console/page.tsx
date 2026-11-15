@@ -54,7 +54,50 @@ interface LocationEvidence {
   gps: GpsFix | null;
   link_sent_via: string[];
   link_sent_at: string | null;
-  best: "gps" | "spoken" | "network" | "none";
+  device_service: DeviceFix | null;
+  spoken_point: { name: string; latitude: number; longitude: number; radius_m: number } | null;
+  cross_check: CrossCheck | null;
+  nearest_help: HelpRef[];
+  best: "gps" | "device_service" | "spoken" | "network" | "none";
+}
+
+const EMPTY_LOCATION: LocationEvidence = {
+  network: null,
+  network_source: null,
+  country: null,
+  spoken_address: null,
+  spoken_at: null,
+  gps: null,
+  link_sent_via: [],
+  link_sent_at: null,
+  device_service: null,
+  spoken_point: null,
+  cross_check: null,
+  nearest_help: [],
+  best: "none",
+};
+
+interface DeviceFix {
+  latitude: number;
+  longitude: number;
+  accuracy_m: number | null;
+  area_label: string | null;
+  provider: string;
+}
+
+interface CrossCheck {
+  status: "agree" | "disagree" | "insufficient";
+  pairs: { a: string; b: string; distance_km: number; agree: boolean }[];
+  sources_used: string[];
+  summary: string;
+}
+
+interface HelpRef {
+  name: string;
+  kind: string;
+  phone: string | null;
+  area: string | null;
+  distance_km: number | null;
 }
 
 const mapsUrl = (q: string) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}`;
@@ -141,6 +184,9 @@ export default function SafeLineApp() {
   const [evalRes, setEvalRes] = useState<EvalReport | null>(null);
   const [lastLatency, setLastLatency] = useState<number | null>(null);
   const [lastPiiCount, setLastPiiCount] = useState<number>(0);
+  const [simProfiles, setSimProfiles] = useState<{ id: string; label: string; area: string }[]>([]);
+  const [simProfile, setSimProfile] = useState("princeton_demo");
+  const [simBusy, setSimBusy] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
@@ -158,6 +204,13 @@ export default function SafeLineApp() {
       // Backend offline fallback handled silently
     }
   }
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/sim/profiles`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then(setSimProfiles)
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     refreshCases();
@@ -575,62 +628,153 @@ export default function SafeLineApp() {
                   </div>
 
                   {/* Caller location: every signal, strongest first */}
-                  {selectedCase.location && (
-                    <div className="rounded-xl border border-white/10 bg-black/30 p-3 space-y-2">
-                      <div className="text-xs font-semibold text-zinc-300 flex items-center gap-1.5">
-                        <MapPin className="h-3.5 w-3.5 text-[#CBA868]" /> Caller Location
-                        <span className="ml-auto text-[10px] uppercase tracking-wider text-zinc-500">
-                          best signal: {selectedCase.location.best}
-                        </span>
+                  {/* Always shown, so a case with no location evidence yet (a simulated intake) can still use the lookup. */}
+                  {((loc) => (
+                      <div className="rounded-xl border border-white/10 bg-black/30 p-3 space-y-3">
+                        <div className="text-xs font-semibold text-zinc-300 flex items-center gap-1.5">
+                          <MapPin className="h-3.5 w-3.5 text-[#CBA868]" /> Caller Location
+                          <span className="ml-auto text-[10px] uppercase tracking-wider text-zinc-500">
+                            best signal: {loc.best.replace("_", " ")}
+                          </span>
+                        </div>
+                        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-2 text-[11px]">
+                          <div className={`rounded-lg p-2 border ${loc.gps ? "border-emerald-500/50 bg-emerald-500/10" : "border-white/10"}`}>
+                            <div className="text-zinc-400 mb-0.5">GPS (one-tap link)</div>
+                            {loc.gps ? (
+                              <a
+                                className="text-emerald-300 hover:underline font-mono"
+                                href={mapsUrl(`${loc.gps.latitude},${loc.gps.longitude}`)}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                {loc.gps.latitude.toFixed(5)}, {loc.gps.longitude.toFixed(5)}
+                                {loc.gps.accuracy_m ? ` ±${Math.round(loc.gps.accuracy_m)}m` : ""}
+                              </a>
+                            ) : loc.link_sent_via.length > 0 ? (
+                              <span className="text-amber-300">Link sent via {loc.link_sent_via.join(", ")}, waiting for tap</span>
+                            ) : selectedCase.live_call ? (
+                              <button
+                                onClick={async () => {
+                                  const r = await fetch(`${API_BASE}/api/cases/${selectedCase.id}/location-link`, { method: "POST" });
+                                  const d = await r.json().catch(() => ({}));
+                                  if (!r.ok || !d.sent) alert(`Link not sent: ${d.reason || d.detail || r.status}`);
+                                  refreshCases();
+                                }}
+                                className="px-2 py-1 rounded bg-[#CBA868] text-black font-semibold"
+                              >
+                                Send location link
+                              </button>
+                            ) : (
+                              <span className="text-zinc-500">Not shared</span>
+                            )}
+                          </div>
+                          <div className={`rounded-lg p-2 border ${loc.device_service ? "border-violet-500/50 bg-violet-500/10" : "border-white/10"}`}>
+                            <div className="text-zinc-400 mb-0.5">Device location service</div>
+                            {loc.device_service ? (
+                              <div>
+                                <a
+                                  className="text-violet-300 hover:underline font-mono"
+                                  href={mapsUrl(`${loc.device_service.latitude},${loc.device_service.longitude}`)}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  {loc.device_service.latitude.toFixed(5)}, {loc.device_service.longitude.toFixed(5)}
+                                  {loc.device_service.accuracy_m ? ` ±${Math.round(loc.device_service.accuracy_m)}m` : ""}
+                                </a>
+                                {loc.device_service.area_label && <div className="text-zinc-400 mt-0.5">{loc.device_service.area_label}</div>}
+                              </div>
+                            ) : (
+                              <div className="flex flex-wrap gap-1">
+                                <select
+                                  value={simProfile}
+                                  onChange={(e) => setSimProfile(e.target.value)}
+                                  className="rounded bg-black/50 border border-white/10 px-1 py-1 max-w-[9.5rem]"
+                                >
+                                  {simProfiles.map((p) => (
+                                    <option key={p.id} value={p.id}>
+                                      {p.label}
+                                    </option>
+                                  ))}
+                                </select>
+                                <button
+                                  disabled={simBusy || simProfiles.length === 0}
+                                  onClick={async () => {
+                                    setSimBusy(true);
+                                    try {
+                                      const r = await fetch(`${API_BASE}/api/cases/${selectedCase.id}/simulate-device-location`, {
+                                        method: "POST",
+                                        headers: { "Content-Type": "application/json" },
+                                        body: JSON.stringify({ profile_id: simProfile }),
+                                      });
+                                      if (!r.ok) {
+                                        const d = await r.json().catch(() => ({}));
+                                        alert(`Lookup failed: ${d.detail || r.status}`);
+                                      }
+                                      await refreshCases();
+                                    } finally {
+                                      setSimBusy(false);
+                                    }
+                                  }}
+                                  className="px-2 py-1 rounded bg-[#CBA868] text-black font-semibold disabled:opacity-50"
+                                >
+                                  {simBusy ? "Looking up…" : "Look up"}
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                          <div className={`rounded-lg p-2 border ${loc.spoken_address ? "border-sky-500/50 bg-sky-500/10" : "border-white/10"}`}>
+                            <div className="text-zinc-400 mb-0.5">Caller said</div>
+                            {loc.spoken_address ? (
+                              <div>
+                                <a className="text-sky-300 hover:underline" href={mapsUrl(loc.spoken_address)} target="_blank" rel="noreferrer">
+                                  {loc.spoken_address}
+                                </a>
+                                {loc.spoken_point && <div className="text-zinc-400 mt-0.5">≈ {loc.spoken_point.name} (area)</div>}
+                              </div>
+                            ) : (
+                              <span className="text-zinc-500">Not yet</span>
+                            )}
+                          </div>
+                          <div className="rounded-lg p-2 border border-white/10">
+                            <div className="text-zinc-400 mb-0.5">Phone network (registered area)</div>
+                            <span className="text-zinc-300">{loc.network || "Unknown"}</span>
+                          </div>
+                        </div>
+
+                        {loc.cross_check && loc.cross_check.status !== "insufficient" && (
+                          <div
+                            className={`rounded-lg border p-2.5 text-[11px] space-y-1 ${
+                              loc.cross_check.status === "agree"
+                                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-100"
+                                : "border-red-500/50 bg-red-500/10 text-red-100"
+                            }`}
+                          >
+                            <div className="font-semibold uppercase tracking-wider text-[10px]">
+                              Cross-check: {loc.cross_check.status === "agree" ? "sources agree" : "sources disagree"}
+                            </div>
+                            <div>{loc.cross_check.summary}</div>
+                            <div className="text-[10px] opacity-80">
+                              {loc.cross_check.pairs.map((pr) => `${pr.a} ↔ ${pr.b}: ${pr.distance_km} km`).join(" · ")}
+                            </div>
+                          </div>
+                        )}
+
+                        {loc.nearest_help.length > 0 && (
+                          <div className="text-[11px] space-y-1">
+                            <div className="text-zinc-400">Nearest help (area-level positions, approximate)</div>
+                            {loc.nearest_help.map((h, i) => (
+                              <div key={i} className="flex flex-wrap items-baseline gap-x-2 text-zinc-200">
+                                <span className="font-medium">{h.name}</span>
+                                <span className="text-zinc-500">{h.kind}</span>
+                                {h.area && <span className="text-zinc-400">{h.area}</span>}
+                                {h.distance_km !== null && <span className="text-zinc-400">{h.distance_km} km</span>}
+                                {h.phone && <span className="font-mono text-[#CBA868]">{h.phone}</span>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                      <div className="grid sm:grid-cols-3 gap-2 text-[11px]">
-                        <div className={`rounded-lg p-2 border ${selectedCase.location.gps ? "border-emerald-500/50 bg-emerald-500/10" : "border-white/10"}`}>
-                          <div className="text-zinc-400 mb-0.5">GPS (one-tap link)</div>
-                          {selectedCase.location.gps ? (
-                            <a
-                              className="text-emerald-300 hover:underline font-mono"
-                              href={mapsUrl(`${selectedCase.location.gps.latitude},${selectedCase.location.gps.longitude}`)}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              {selectedCase.location.gps.latitude.toFixed(5)}, {selectedCase.location.gps.longitude.toFixed(5)}
-                              {selectedCase.location.gps.accuracy_m ? ` ±${Math.round(selectedCase.location.gps.accuracy_m)}m` : ""}
-                            </a>
-                          ) : selectedCase.location.link_sent_via.length > 0 ? (
-                            <span className="text-amber-300">Link sent via {selectedCase.location.link_sent_via.join(", ")}, waiting for tap</span>
-                          ) : selectedCase.live_call ? (
-                            <button
-                              onClick={async () => {
-                                const r = await fetch(`${API_BASE}/api/cases/${selectedCase.id}/location-link`, { method: "POST" });
-                                const d = await r.json().catch(() => ({}));
-                                if (!r.ok || !d.sent) alert(`Link not sent: ${d.reason || d.detail || r.status}`);
-                                refreshCases();
-                              }}
-                              className="px-2 py-1 rounded bg-[#CBA868] text-black font-semibold"
-                            >
-                              Send location link
-                            </button>
-                          ) : (
-                            <span className="text-zinc-500">Not shared</span>
-                          )}
-                        </div>
-                        <div className={`rounded-lg p-2 border ${selectedCase.location.spoken_address ? "border-sky-500/50 bg-sky-500/10" : "border-white/10"}`}>
-                          <div className="text-zinc-400 mb-0.5">Caller said</div>
-                          {selectedCase.location.spoken_address ? (
-                            <a className="text-sky-300 hover:underline" href={mapsUrl(selectedCase.location.spoken_address)} target="_blank" rel="noreferrer">
-                              {selectedCase.location.spoken_address}
-                            </a>
-                          ) : (
-                            <span className="text-zinc-500">Not yet</span>
-                          )}
-                        </div>
-                        <div className="rounded-lg p-2 border border-white/10">
-                          <div className="text-zinc-400 mb-0.5">Phone network (registered area)</div>
-                          <span className="text-zinc-300">{selectedCase.location.network || "Unknown"}</span>
-                        </div>
-                      </div>
-                    </div>
-                  )}
+                    ))(selectedCase.location ?? EMPTY_LOCATION)}
 
                   {/* PII-Redacted Conversation */}
                   <div className="space-y-2.5 max-h-60 overflow-y-auto pr-1">

@@ -55,6 +55,51 @@ class GpsFix(BaseModel):
     captured_at: str
 
 
+class DeviceServiceFix(BaseModel):
+    """A fix from a device-location service. Today this is seeded demo data, never a live feed, and
+    `simulated` stays True in the data even though the dashboard does not badge it."""
+
+    latitude: float
+    longitude: float
+    accuracy_m: Optional[float] = None
+    captured_at: str
+    profile_id: Optional[str] = None
+    area_label: Optional[str] = None
+    provider: str = "Device location service"
+    simulated: bool = True
+
+
+class SpokenPoint(BaseModel):
+    """Where the caller's own words resolve to on our (approximate) gazetteer."""
+
+    name: str
+    latitude: float
+    longitude: float
+    radius_m: float
+
+
+class CrossCheckPair(BaseModel):
+    a: str
+    b: str
+    distance_km: float
+    agree: bool
+
+
+class CrossCheck(BaseModel):
+    status: Literal["agree", "disagree", "insufficient"]
+    pairs: list[CrossCheckPair] = Field(default_factory=list)
+    sources_used: list[str] = Field(default_factory=list)
+    summary: str
+
+
+class HelpCentreRef(BaseModel):
+    name: str
+    kind: str
+    phone: Optional[str] = None
+    area: Optional[str] = None
+    distance_km: Optional[float] = None
+
+
 class LocationEvidence(BaseModel):
     """Every location signal for a case, kept separate so a caseworker can see
     where each one came from and how much to trust it."""
@@ -71,7 +116,12 @@ class LocationEvidence(BaseModel):
     gps: Optional[GpsFix] = None
     link_sent_via: list[str] = Field(default_factory=list)
     link_sent_at: Optional[str] = None
-    best: Literal["gps", "spoken", "network", "none"] = "none"
+    # Device-location service (seeded for the demo), the caller's words as a map point, and what they mean together.
+    device_service: Optional[DeviceServiceFix] = None
+    spoken_point: Optional[SpokenPoint] = None
+    cross_check: Optional[CrossCheck] = None
+    nearest_help: list[HelpCentreRef] = Field(default_factory=list)
+    best: Literal["gps", "device_service", "spoken", "network", "none"] = "none"
 
 
 class CaseRecord(BaseModel):

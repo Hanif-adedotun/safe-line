@@ -35,7 +35,11 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import quote_plus
 
-from app.models import CaseRecord, GpsFix, LocationEvidence
+from app.models import (
+    CaseRecord, CrossCheck, DeviceServiceFix, GpsFix, HelpCentreRef, LocationEvidence, SpokenPoint,
+)
+from app.services import geo
+from app.services import simulated_device_location as sim
 from app.services.case_store import get_case, save_case
 from app.voice.caller_location import CallerLocation
 
@@ -61,6 +65,7 @@ class LiveCall:
     inject: Optional[Injector] = None
     tokens: set[str] = field(default_factory=set)
     auto_link: Optional["asyncio.Task[dict]"] = None
+    sim_task: Optional["asyncio.Task[dict]"] = None
 
 
 @dataclass
@@ -91,17 +96,26 @@ def describe_best_location(loc: Optional[LocationEvidence]) -> Optional[str]:
         return None
     if loc.gps:
         acc = f" ±{round(loc.gps.accuracy_m)}m" if loc.gps.accuracy_m else ""
-        return f"GPS{acc}: {gps_maps_url(loc.gps.latitude, loc.gps.longitude)}"
-    if loc.spoken_address:
-        return f"Caller said: {loc.spoken_address} ({address_maps_url(loc.spoken_address)})"
-    if loc.network:
+        line = f"GPS{acc}: {gps_maps_url(loc.gps.latitude, loc.gps.longitude)}"
+    elif loc.device_service:
+        acc = f" ±{round(loc.device_service.accuracy_m)}m" if loc.device_service.accuracy_m else ""
+        line = f"Device location{acc}: {gps_maps_url(loc.device_service.latitude, loc.device_service.longitude)}"
+    elif loc.spoken_address:
+        line = f"Caller said: {loc.spoken_address} ({address_maps_url(loc.spoken_address)})"
+    elif loc.network:
         return f"Phone network area: {loc.network} (registered area, not live)"
-    return None
+    else:
+        return None
+    if loc.cross_check and loc.cross_check.status == "disagree":
+        line += f" | {loc.cross_check.summary}"
+    return line
 
 
 def _best(loc: LocationEvidence) -> str:
     if loc.gps:
         return "gps"
+    if loc.device_service:
+        return "device_service"
     if loc.spoken_address:
         return "spoken"
     if loc.network:
@@ -187,6 +201,29 @@ def get_live_call(case_id: str) -> Optional[LiveCall]:
     return _calls.get(case_id)
 
 
+def _refresh_derived(loc: LocationEvidence) -> None:
+    """Recompute what depends on the raw signals: the spoken words as a map point, the cross-check between
+    sources, and the nearest help. Runs on every change, so the dashboard is never stale."""
+    place = geo.resolve_place(loc.spoken_address)
+    loc.spoken_point = (
+        SpokenPoint(name=place.name, latitude=place.lat, longitude=place.lng, radius_m=place.radius_m) if place else None
+    )
+    sources: list[geo.Source] = []
+    if loc.gps:
+        sources.append(geo.Source("GPS link", loc.gps.latitude, loc.gps.longitude, loc.gps.accuracy_m or 100.0))
+    if loc.device_service:
+        fix = loc.device_service
+        sources.append(geo.Source("Device location service", fix.latitude, fix.longitude, fix.accuracy_m or 300.0))
+    if loc.spoken_point:
+        sp = loc.spoken_point
+        sources.append(geo.Source("What the caller said", sp.latitude, sp.longitude, sp.radius_m))
+    loc.cross_check = CrossCheck(**geo.cross_check(sources)) if sources else None
+    anchor = sources[0] if sources else None  # sources are ordered most precise first
+    loc.nearest_help = (
+        [HelpCentreRef(**h) for h in geo.nearest_help(anchor.lat, anchor.lng, loc.country)] if anchor else []
+    )
+
+
 def _update_location(case_id: str, mutate: Callable[[LocationEvidence, CaseRecord], None]) -> Optional[CaseRecord]:
     case = get_case(case_id)
     if not case:
@@ -194,10 +231,44 @@ def _update_location(case_id: str, mutate: Callable[[LocationEvidence, CaseRecor
     loc = case.location or LocationEvidence()
     mutate(loc, case)
     loc.best = _best(loc)
+    _refresh_derived(loc)
     case.location = loc
     case.updated_at = _now()
     save_case(case)
     return case
+
+
+# --------------------------------------------------------------------------- #
+# Device-location service (seeded for the demo)
+# --------------------------------------------------------------------------- #
+async def attach_simulated_device_location(case_id: str, profile_id: Optional[str] = None) -> dict[str, Any]:
+    """Ask the (seeded) device-location feed about this case. With no profile id it uses the live call's number."""
+    call = _calls.get(case_id)
+    phone = call.caller_number if call else None
+    fix = await sim.lookup(profile_id=profile_id, phone=phone)
+    if not fix:
+        return {"attached": False, "reason": "no_profile"}
+
+    def mutate(loc: LocationEvidence, _case: CaseRecord) -> None:
+        loc.device_service = DeviceServiceFix(
+            latitude=fix["lat"], longitude=fix["lng"], accuracy_m=fix["accuracy_m"], captured_at=_now(),
+            profile_id=fix["profile_id"], area_label=fix["area"],
+        )
+        if not loc.gps:  # the map pin follows the best fix; a real GPS fix still wins
+            _case.latitude, _case.longitude = fix["lat"], fix["lng"]
+
+    if not _update_location(case_id, mutate):
+        return {"attached": False, "reason": "case_not_found"}
+    logger.info("Device-location feed attached case=%s profile=%s", case_id, fix["profile_id"])
+    return {"attached": True, "profile": fix["profile_id"]}
+
+
+def start_simulated_lookup(case_id: str) -> None:
+    """On a call from a seeded number, the feed answers a moment after the call connects."""
+    call = _calls.get(case_id)
+    if not call or not sim.auto_enabled() or not sim.profile_for_number(call.caller_number):
+        return
+    call.sim_task = asyncio.create_task(attach_simulated_device_location(case_id))
 
 
 # --------------------------------------------------------------------------- #
